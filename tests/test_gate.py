@@ -71,3 +71,454 @@ class TestKillSwitchOptional:
         gate = RiskGate(_cfg(kill_switch_path=tmp_path / "KILL"), store)
         assert gate.kill_switch_active() is False
         assert gate.block_reason(_req()) is None
+
+
+class TestPublicApi:
+    """Everything in ``__all__`` imports from the package root."""
+
+    def test_all_names_resolve(self) -> None:
+        import pretrade_gate
+
+        for name in pretrade_gate.__all__:
+            assert getattr(pretrade_gate, name) is not None
+
+    def test_sqlite_store_importable_from_its_module(self) -> None:
+        from pretrade_gate.sqlite_store import SqliteStateStore
+
+        assert SqliteStateStore is not None
+
+
+class TestGateDecisionTable:
+    """Table-driven scenarios: each row must give the SAME verdict in both modes.
+
+    The test instantiates two independent gates (one we treat as "paper",
+    one as "live") with the same config and inputs, applies the same
+    pre-conditions to each, and asserts identical verdicts. Identical config
+    + identical inputs MUST yield identical decisions.
+    """
+
+    def test_all_pass(self, store) -> None:
+        gate = RiskGate(_cfg(), store)
+        assert gate.block_reason(_req()) is None
+
+    def test_kill_switch_blocks(self, tmp_path: Path, store) -> None:
+        kill = tmp_path / "KILL"
+        kill.write_text("halt")
+        gate_paper = RiskGate(_cfg(kill_switch_path=kill), store)
+        gate_live = RiskGate(_cfg(kill_switch_path=kill), store)
+        assert gate_paper.block_reason(_req()) == gate_live.block_reason(_req())
+        assert "KILL switch active" in (gate_live.block_reason(_req()) or "")
+
+    @pytest.mark.asyncio
+    async def test_daily_loss_halt_blocks_each_mode_on_its_leg(self, store) -> None:
+        # Each mode halts on its OWN realized-loss leg.
+        gate_paper = RiskGate(_cfg(daily_loss_halt_usd=10.0), store, is_live=False)
+        gate_live = RiskGate(_cfg(daily_loss_halt_usd=10.0), store, is_live=True)
+        await gate_paper.record_realized_pnl(-10.5, is_live=False)
+        await gate_live.record_realized_pnl(-10.5, is_live=True)
+        assert "daily loss halt" in (gate_paper.block_reason(_req()) or "")
+        assert "daily loss halt" in (gate_live.block_reason(_req()) or "")
+
+    def test_position_open_blocks(self, store) -> None:
+        gate = RiskGate(_cfg(), store)
+        msg = gate.block_reason(_req(position_open=True))
+        assert msg == "an open position/order already exists (max 1)"
+
+    def test_resting_entry_blocks(self, store) -> None:
+        gate = RiskGate(_cfg(), store)
+        msg = gate.block_reason(_req(entry_order_resting=True))
+        assert msg == "an open position/order already exists (max 1)"
+
+    def test_per_trade_cap_blocks(self, store) -> None:
+        gate = RiskGate(_cfg(max_trade_usd=3.0), store)
+        msg = gate.block_reason(_req(notional_usd=5.0))
+        assert msg is not None and "per-trade cap" in msg
+
+    def test_negative_notional_blocks(self, store) -> None:
+        gate = RiskGate(_cfg(), store)
+        assert gate.block_reason(_req(notional_usd=0.0)) == "notional must be positive"
+
+    @pytest.mark.asyncio
+    async def test_bankroll_cap_blocks_when_set(self, store) -> None:
+        gate = RiskGate(_cfg(bankroll_cap_usd=10.0), store)
+        await gate.record_buy_notional(8.0)
+        msg = gate.block_reason(_req(notional_usd=5.0))
+        assert msg is not None and "daily bankroll cap" in msg
+
+    @pytest.mark.asyncio
+    async def test_bankroll_cap_disabled_when_none(self, store) -> None:
+        gate = RiskGate(_cfg(bankroll_cap_usd=None), store)
+        await gate.record_buy_notional(50.0)
+        assert gate.block_reason(_req(notional_usd=5.0)) is None
+
+    def test_slippage_blocks_when_book_moved_away(self, store) -> None:
+        gate = RiskGate(_cfg(max_entry_slippage=0.02), store)
+        # Book ask is 0.60 but the signal was generated at 0.55 → 5c slippage.
+        msg = gate.block_reason(_req(side_price=0.55, best_ask=0.60))
+        assert msg is not None and "slippage guard" in msg
+
+    def test_slippage_passes_when_book_steady(self, store) -> None:
+        gate = RiskGate(_cfg(max_entry_slippage=0.02), store)
+        # Within tolerance.
+        assert gate.block_reason(_req(side_price=0.55, best_ask=0.56)) is None
+
+    def test_slippage_skipped_when_book_unavailable(self, store) -> None:
+        gate = RiskGate(_cfg(max_entry_slippage=0.02), store)
+        # Book unavailable: other gates still run but slippage does not block.
+        assert gate.block_reason(_req(side_price=0.55, best_ask=None)) is None
+
+
+class TestPaperLiveCounterParity:
+    """Realized PnL and buy notional advance the SAME persisted counters."""
+
+    @pytest.mark.asyncio
+    async def test_paper_pnl_advances_halt(self, store) -> None:
+        gate = RiskGate(_cfg(daily_loss_halt_usd=10.0), store)
+        await gate.record_realized_pnl(-4.0, is_live=False)
+        assert gate.block_reason(_req()) is None  # not yet at halt
+        await gate.record_realized_pnl(-6.5, is_live=False)  # cumulative -10.5
+        msg = gate.block_reason(_req())
+        assert msg is not None and "daily loss halt" in msg
+
+    @pytest.mark.asyncio
+    async def test_buy_notional_credit_back_releases_cap(self, store) -> None:
+        gate = RiskGate(_cfg(bankroll_cap_usd=10.0), store)
+        await gate.record_buy_notional(8.0)
+        # 8 + 5 > 10 → blocked.
+        assert "bankroll cap" in (gate.block_reason(_req(notional_usd=5.0)) or "")
+        # Credit back $4 (e.g. partial cancel).
+        await gate.record_buy_notional(-4.0)
+        # 4 + 5 ≤ 10 → unblocked.
+        assert gate.block_reason(_req(notional_usd=5.0)) is None
+
+
+class TestPnlSplit:
+    """Live and paper PnL track separately; the halt uses the running mode's
+    OWN leg, not the sum."""
+
+    @pytest.mark.asyncio
+    async def test_live_paper_separate_buckets(self, store) -> None:
+        gate = RiskGate(_cfg(daily_loss_halt_usd=10.0), store)
+        await gate.record_realized_pnl(5.0, is_live=True)
+        await gate.record_realized_pnl(-2.0, is_live=False)
+        assert gate.live_pnl == pytest.approx(5.0)
+        assert gate.paper_pnl == pytest.approx(-2.0)
+        assert gate.daily_realized_pnl == pytest.approx(3.0)
+
+    @pytest.mark.asyncio
+    async def test_paper_losses_do_not_halt_live(self, store) -> None:
+        # Paper-study losses must not halt live trading.
+        live = RiskGate(_cfg(daily_loss_halt_usd=10.0), store, is_live=True)
+        await live.record_realized_pnl(-3.0, is_live=True)  # live within limit
+        await live.record_realized_pnl(-20.0, is_live=False)  # huge paper loss
+        assert live.block_reason(_req()) is None  # live leg -3 > -10 → not halted
+
+    @pytest.mark.asyncio
+    async def test_live_halts_on_live_leg_only(self, store) -> None:
+        live = RiskGate(_cfg(daily_loss_halt_usd=10.0), store, is_live=True)
+        await live.record_realized_pnl(-11.0, is_live=True)
+        msg = live.block_reason(_req())
+        assert msg is not None and "daily loss halt" in msg and "live" in msg
+
+
+class TestLossHaltBypassBothModes:
+    """The loss-halt bypass is an operator runtime knob that applies in BOTH
+    paper and live."""
+
+    @pytest.mark.asyncio
+    async def test_live_gate_respects_bypass_flag(self, store) -> None:
+        from pretrade_gate import set_loss_halt_bypass
+
+        await set_loss_halt_bypass(store, True)  # operator hits the toggle
+        live = RiskGate(_cfg(daily_loss_halt_usd=10.0), store, is_live=True)
+        await live.record_realized_pnl(-15.0, is_live=True)
+        await live.refresh_overrides()
+        # Live HONOURS the bypass — keeps trading past the limit.
+        assert live.bypass_loss_halt is True
+        assert live.loss_halt_breached() is False
+        assert live.block_reason(_req()) is None
+        # Other gates STILL run (per-trade cap, slippage, singleton).
+        msg = live.block_reason(_req(notional_usd=999.0))
+        assert msg is not None and "per-trade cap" in msg
+
+    @pytest.mark.asyncio
+    async def test_paper_gate_respects_bypass_flag(self, store) -> None:
+        from pretrade_gate import set_loss_halt_bypass
+
+        await set_loss_halt_bypass(store, True)
+        paper = RiskGate(_cfg(daily_loss_halt_usd=10.0), store, is_live=False)
+        await paper.record_realized_pnl(-15.0, is_live=False)
+        await paper.refresh_overrides()
+        assert paper.block_reason(_req()) is None
+        assert paper.bypass_loss_halt is True
+
+    @pytest.mark.asyncio
+    async def test_bypass_off_halts_live(self, store) -> None:
+        from pretrade_gate import set_loss_halt_bypass
+
+        await set_loss_halt_bypass(store, False)
+        live = RiskGate(_cfg(daily_loss_halt_usd=10.0), store, is_live=True)
+        await live.record_realized_pnl(-15.0, is_live=True)
+        await live.refresh_overrides()
+        assert "daily loss halt" in (live.block_reason(_req()) or "")
+
+
+class TestLossHaltBreached:
+    """``loss_halt_breached()`` — the predicate the loop uses to auto-stop."""
+
+    @pytest.mark.asyncio
+    async def test_true_on_live_leg_past_limit(self, store) -> None:
+        live = RiskGate(_cfg(daily_loss_halt_usd=10.0), store, is_live=True)
+        await live.record_realized_pnl(-10.0, is_live=True)
+        assert live.loss_halt_breached() is True
+
+    @pytest.mark.asyncio
+    async def test_false_within_limit(self, store) -> None:
+        live = RiskGate(_cfg(daily_loss_halt_usd=10.0), store, is_live=True)
+        await live.record_realized_pnl(-9.99, is_live=True)
+        assert live.loss_halt_breached() is False
+
+    @pytest.mark.asyncio
+    async def test_false_when_bypassed(self, store) -> None:
+        from pretrade_gate import set_loss_halt_bypass
+
+        await set_loss_halt_bypass(store, True)
+        live = RiskGate(_cfg(daily_loss_halt_usd=10.0), store, is_live=True)
+        await live.record_realized_pnl(-50.0, is_live=True)
+        await live.refresh_overrides()
+        assert live.loss_halt_breached() is False
+
+    @pytest.mark.asyncio
+    async def test_paper_leg_ignored_in_live(self, store) -> None:
+        live = RiskGate(_cfg(daily_loss_halt_usd=10.0), store, is_live=True)
+        await live.record_realized_pnl(-50.0, is_live=False)  # paper only
+        assert live.loss_halt_breached() is False
+
+
+class TestTrailingHighWaterMarkHalt:
+    """The loss halt is a TRAILING drawdown from the session high-water mark,
+    not a fixed cumulative floor.
+
+    floor = peak - LIMIT (peak ratchets up only, starts at 0 each UTC day).
+    A never-profitable session keeps peak=0 ⇒ behaves exactly like a
+    fixed -LIMIT floor (fail-safe). After locking gains you can only give back
+    LIMIT from the peak.
+    """
+
+    @pytest.mark.asyncio
+    async def test_never_profitable_matches_fixed_floor(self, store) -> None:
+        # peak never leaves 0 ⇒ identical to a plain fixed -$10 floor.
+        gate = RiskGate(_cfg(daily_loss_halt_usd=10.0), store, is_live=True)
+        await gate.record_realized_pnl(-9.5, is_live=True)
+        assert gate.loss_halt_breached() is False
+        await gate.record_realized_pnl(-0.5, is_live=True)  # -10.0
+        assert gate.loss_halt_breached() is True
+
+    @pytest.mark.asyncio
+    async def test_operator_headroom_example(self, store) -> None:
+        # The operator's worked example (LIMIT=10): start 10; +2→10; -2→8; +2→10.
+        gate = RiskGate(_cfg(daily_loss_halt_usd=10.0), store, is_live=True)
+        assert gate.loss_halt_headroom == pytest.approx(10.0)
+        await gate.record_realized_pnl(2.0, is_live=True)
+        assert gate.loss_halt_headroom == pytest.approx(10.0)
+        assert gate.halt_peak == pytest.approx(2.0)
+        await gate.record_realized_pnl(-2.0, is_live=True)  # back to 0
+        assert gate.loss_halt_headroom == pytest.approx(8.0)
+        assert gate.loss_halt_breached() is False
+        await gate.record_realized_pnl(2.0, is_live=True)  # back to peak
+        assert gate.loss_halt_headroom == pytest.approx(10.0)
+
+    @pytest.mark.asyncio
+    async def test_trailing_stop_locks_gains(self, store) -> None:
+        # After a $30 run, can only give back $10 (halt at +20), not 30+10.
+        gate = RiskGate(_cfg(daily_loss_halt_usd=10.0), store, is_live=True)
+        await gate.record_realized_pnl(30.0, is_live=True)
+        assert gate.halt_peak == pytest.approx(30.0)
+        assert gate.loss_halt_breached() is False
+        await gate.record_realized_pnl(-9.0, is_live=True)  # +21, gave back 9
+        assert gate.loss_halt_breached() is False
+        await gate.record_realized_pnl(-1.5, is_live=True)  # +19.5, gave back 10.5
+        assert gate.loss_halt_breached() is True
+
+    @pytest.mark.asyncio
+    async def test_peak_persists_across_reload(self, store) -> None:
+        gate = RiskGate(_cfg(daily_loss_halt_usd=10.0), store, is_live=True)
+        await gate.record_realized_pnl(20.0, is_live=True)  # peak 20
+        await gate.record_realized_pnl(-5.0, is_live=True)  # +15
+        gate2 = RiskGate(_cfg(daily_loss_halt_usd=10.0), store, is_live=True)
+        await gate2.load()
+        assert gate2.halt_peak == pytest.approx(20.0)
+        assert gate2.loss_halt_breached() is False  # +15 > floor +10
+        await gate2.record_realized_pnl(-5.0, is_live=True)  # +10 == floor
+        assert gate2.loss_halt_breached() is True
+
+    @pytest.mark.asyncio
+    async def test_load_without_peak_key_derives_from_pnl(self, store) -> None:
+        # Older session state: pnl key set, peak key absent → peak = max(0, pnl).
+        from datetime import UTC, datetime
+
+        today = datetime.now(UTC).date().isoformat()
+        await store.set("gate.date", today)
+        await store.set("gate.live_realized_pnl", repr(8.0))
+        gate = RiskGate(_cfg(daily_loss_halt_usd=10.0), store, is_live=True)
+        await gate.load()
+        assert gate.halt_peak == pytest.approx(8.0)
+
+    @pytest.mark.asyncio
+    async def test_rollover_resets_peak(self, store) -> None:
+        gate = RiskGate(_cfg(daily_loss_halt_usd=10.0), store, is_live=True)
+        await gate.record_realized_pnl(30.0, is_live=True)
+        assert gate.halt_peak == pytest.approx(30.0)
+        gate._date = "2000-01-01"  # force a stale UTC day
+        gate._roll_daily_window()
+        assert gate.halt_peak == 0.0
+        assert gate.halt_pnl == 0.0
+
+    @pytest.mark.asyncio
+    async def test_bypass_overrides_trailing_halt(self, store) -> None:
+        from pretrade_gate import set_loss_halt_bypass
+
+        await set_loss_halt_bypass(store, True)
+        gate = RiskGate(_cfg(daily_loss_halt_usd=10.0), store, is_live=True)
+        await gate.record_realized_pnl(30.0, is_live=True)
+        await gate.record_realized_pnl(-20.0, is_live=True)  # +10, well past floor +20
+        await gate.refresh_overrides()
+        assert gate.loss_halt_breached() is False
+
+    @pytest.mark.asyncio
+    async def test_peak_is_per_leg(self, store) -> None:
+        # The live peak ratchets only on live PnL; paper PnL never moves it.
+        live = RiskGate(_cfg(daily_loss_halt_usd=10.0), store, is_live=True)
+        await live.record_realized_pnl(25.0, is_live=False)  # paper only
+        assert live.halt_peak == 0.0  # live leg untouched
+        await live.record_realized_pnl(5.0, is_live=True)
+        assert live.halt_peak == pytest.approx(5.0)
+
+    @pytest.mark.asyncio
+    async def test_block_reason_cites_trailing_floor(self, store) -> None:
+        gate = RiskGate(_cfg(daily_loss_halt_usd=10.0), store, is_live=True)
+        await gate.record_realized_pnl(30.0, is_live=True)
+        await gate.record_realized_pnl(-12.0, is_live=True)  # +18 <= floor +20
+        msg = gate.block_reason(_req())
+        assert msg is not None and "daily loss halt" in msg
+        assert "peak" in msg  # the message explains the trailing nature
+
+
+class TestRuntimeMaxTradeOverride:
+    """Operator runtime per-trade cap: applies in BOTH modes, no restart."""
+
+    def test_effective_defaults_to_cfg(self, store) -> None:
+        gate = RiskGate(_cfg(max_trade_usd=5.0), store)
+        assert gate.runtime_max_trade_usd is None
+        assert gate.effective_max_trade_usd == 5.0
+
+    @pytest.mark.asyncio
+    async def test_override_lowers_cap(self, store) -> None:
+        from pretrade_gate import set_runtime_max_trade_usd
+
+        gate = RiskGate(_cfg(max_trade_usd=5.0), store)
+        await set_runtime_max_trade_usd(store, 2.0)
+        await gate.refresh_runtime_limits()
+        assert gate.effective_max_trade_usd == 2.0
+        msg = gate.block_reason(_req(notional_usd=3.0))
+        assert msg is not None and "per-trade cap" in msg and "2.00" in msg
+
+    @pytest.mark.asyncio
+    async def test_override_raises_cap_for_both_modes(self, store) -> None:
+        from pretrade_gate import set_runtime_max_trade_usd
+
+        # The runtime cap applies in both modes (paper and live).
+        paper = RiskGate(_cfg(max_trade_usd=3.0), store, is_live=False)
+        live = RiskGate(_cfg(max_trade_usd=3.0), store, is_live=True)
+        # Without override, $5 trips the $3 configured cap in both.
+        assert paper.block_reason(_req(notional_usd=5.0)) is not None
+        assert live.block_reason(_req(notional_usd=5.0)) is not None
+        await set_runtime_max_trade_usd(store, 8.0)
+        await paper.refresh_runtime_limits()
+        await live.refresh_runtime_limits()
+        assert paper.effective_max_trade_usd == 8.0
+        assert live.effective_max_trade_usd == 8.0
+        assert paper.block_reason(_req(notional_usd=5.0)) is None
+        assert live.block_reason(_req(notional_usd=5.0)) is None
+
+    @pytest.mark.asyncio
+    async def test_override_cleared_falls_back_to_default(self, store) -> None:
+        from pretrade_gate import set_runtime_max_trade_usd
+
+        gate = RiskGate(_cfg(max_trade_usd=5.0), store)
+        await set_runtime_max_trade_usd(store, 2.0)
+        await gate.refresh_runtime_limits()
+        assert gate.effective_max_trade_usd == 2.0
+        await set_runtime_max_trade_usd(store, None)  # clear
+        await gate.refresh_runtime_limits()
+        assert gate.runtime_max_trade_usd is None
+        assert gate.effective_max_trade_usd == 5.0
+
+    @pytest.mark.asyncio
+    async def test_set_get_round_trip(self, store) -> None:
+        from pretrade_gate import get_runtime_max_trade_usd, set_runtime_max_trade_usd
+
+        assert await get_runtime_max_trade_usd(store) is None
+        await set_runtime_max_trade_usd(store, 4.5)
+        assert await get_runtime_max_trade_usd(store) == 4.5
+        await set_runtime_max_trade_usd(store, 0)  # ≤0 clears
+        assert await get_runtime_max_trade_usd(store) is None
+
+    @pytest.mark.asyncio
+    async def test_invalid_persisted_value_ignored(self, store) -> None:
+        gate = RiskGate(_cfg(max_trade_usd=5.0), store)
+        await store.set("gate.runtime_max_trade_usd", "not-a-number")
+        await gate.refresh_runtime_limits()
+        assert gate.runtime_max_trade_usd is None
+        assert gate.effective_max_trade_usd == 5.0
+
+
+class TestRuntimeTradeShares:
+    """Operator runtime trade size in shares: precedence + cap derivation."""
+
+    @pytest.mark.asyncio
+    async def test_set_get_round_trip(self, store) -> None:
+        from pretrade_gate import get_runtime_trade_shares, set_runtime_trade_shares
+
+        assert await get_runtime_trade_shares(store) is None
+        await set_runtime_trade_shares(store, 8.0)
+        assert await get_runtime_trade_shares(store) == 8.0
+        await set_runtime_trade_shares(store, 0)  # ≤0 clears
+        assert await get_runtime_trade_shares(store) is None
+
+    @pytest.mark.asyncio
+    async def test_refresh_derives_effective_cap(self, store) -> None:
+        from pretrade_gate import set_runtime_trade_shares
+
+        gate = RiskGate(_cfg(max_trade_usd=5.0), store)
+        await set_runtime_trade_shares(store, 8.0)
+        await gate.refresh_runtime_limits()
+        assert gate.runtime_trade_shares == 8.0
+        # N shares cost ≤ ~$N (price < 1), so the dollar cap derives as N and an
+        # 8-share clip (notional ≤ 8 × 0.99 < 8) never trips its own per-trade cap.
+        assert gate.effective_max_trade_usd == 8.0
+        assert gate.block_reason(_req(notional_usd=7.5)) is None
+
+    @pytest.mark.asyncio
+    async def test_shares_take_precedence_over_dollar_override(self, store) -> None:
+        from pretrade_gate import set_runtime_max_trade_usd, set_runtime_trade_shares
+
+        gate = RiskGate(_cfg(max_trade_usd=5.0), store)
+        await set_runtime_max_trade_usd(store, 3.0)
+        await set_runtime_trade_shares(store, 10.0)
+        await gate.refresh_runtime_limits()
+        assert gate.effective_max_trade_usd == 10.0  # shares win
+
+    @pytest.mark.asyncio
+    async def test_cleared_shares_fall_back_to_dollar_override(self, store) -> None:
+        from pretrade_gate import set_runtime_max_trade_usd, set_runtime_trade_shares
+
+        gate = RiskGate(_cfg(max_trade_usd=5.0), store)
+        await set_runtime_max_trade_usd(store, 3.0)
+        await set_runtime_trade_shares(store, 10.0)
+        await gate.refresh_runtime_limits()
+        assert gate.effective_max_trade_usd == 10.0
+        await set_runtime_trade_shares(store, None)  # clear shares
+        await gate.refresh_runtime_limits()
+        assert gate.runtime_trade_shares is None
+        assert gate.effective_max_trade_usd == 3.0  # falls back to the dollar override
