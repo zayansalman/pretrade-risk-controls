@@ -25,7 +25,7 @@ dependencies = []
 
 [project.optional-dependencies]
 sqlite = ["aiosqlite>=0.20"]
-dev = ["pytest", "pytest-asyncio", "ruff", "aiosqlite>=0.20"]
+dev = ["pytest", "pytest-asyncio", "ruff>=0.16,<0.17", "aiosqlite>=0.20"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/pretrade_gate"]
