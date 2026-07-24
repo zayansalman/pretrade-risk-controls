@@ -20,7 +20,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Optional
 
 from pretrade_gate import keys
 from pretrade_gate.store import StateStore, read_positive_float
@@ -36,9 +35,9 @@ class GateConfig:
 
     max_trade_usd: float
     daily_loss_halt_usd: float
-    bankroll_cap_usd: Optional[float]  # None / ≤0 → cap disabled
+    bankroll_cap_usd: float | None  # None / ≤0 → cap disabled
     max_entry_slippage: float
-    kill_switch_path: Optional[Path] = None  # None → kill switch disabled
+    kill_switch_path: Path | None = None  # None → kill switch disabled
 
 
 @dataclass(frozen=True)
@@ -53,8 +52,8 @@ class EntryRequest:
     notional_usd: float
     position_open: bool  # any open ledger / live position
     entry_order_resting: bool  # live: unfilled entry order resting in the book
-    side_price: Optional[float]  # the price the signal was computed against
-    best_ask: Optional[float]  # the live ask AT FILL TIME
+    side_price: float | None  # the price the signal was computed against
+    best_ask: float | None  # the live ask AT FILL TIME
 
 
 # ---------------------------------------------------------------------------

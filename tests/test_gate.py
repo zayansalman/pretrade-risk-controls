@@ -9,7 +9,6 @@ unified gate exists to prevent.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
 
 import pytest
 
@@ -20,7 +19,7 @@ def _cfg(
     *,
     max_trade_usd: float = 5.0,
     daily_loss_halt_usd: float = 10.0,
-    bankroll_cap_usd: Optional[float] = None,
+    bankroll_cap_usd: float | None = None,
     max_entry_slippage: float = 0.02,
     kill_switch_path: Path | None = None,
 ) -> GateConfig:
