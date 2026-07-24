@@ -14,6 +14,29 @@ pip install -e .            # core: stdlib only
 pip install -e ".[sqlite]"  # adds the SQLite-backed store (aiosqlite)
 ```
 
+## Where it fits
+
+```mermaid
+flowchart LR
+    S[Strategy plug-ins] --> R[pretrade-gate<br/>pre-trade risk]
+    D[Market data sources] --> E
+    R --> E[polymarket-ems<br/>execution engine<br/><i>in development</i>]
+    E --> V[(Polymarket CLOB)]
+    E --> L[(Ledger<br/>SQLite)]
+    L --> C[botdeck<br/>operator console]
+    L --> P[ledger-recon<br/>post-trade recon]
+    F[feedwatch<br/>feed health + incidents] -.observes.- D
+    F -.alerts.- C
+    classDef here stroke-width:3px,stroke:#2962ff
+    class R here
+```
+
+Standalone siblings extracted from the same trading system:
+[pretrade-gate](https://github.com/zayansalman/pretrade-gate) — this repo,
+[ledger-recon](https://github.com/zayansalman/ledger-recon),
+[feedwatch](https://github.com/zayansalman/feedwatch), and
+[botdeck](https://github.com/zayansalman/botdeck).
+
 ## Quickstart
 
 ```python
@@ -64,27 +87,55 @@ Run the full narrated walkthrough: `python examples/demo.py`.
 | 7 | Entry slippage guard | paying a price the signal never saw (the edge is gone) |
 | 8 | Persisted counters | a restart quietly resetting the halt or re-granting bankroll |
 
+## The decision path
+
+Every entry — paper or live — walks the same sequence inside
+`RiskGate.block_reason()`. The first tripped gate wins: its reason string goes
+back to the caller verbatim and becomes the operator's log line. `None` is the
+only green light.
+
+```mermaid
+flowchart TD
+    REQ["EntryRequest<br/>notional, position flags,<br/>signal price, book ask"] --> KS{"kill-switch<br/>file exists?"}
+    KS -- yes --> B1["KILL switch active"]
+    KS -- no --> ROLL["roll UTC daily window<br/>a new day zeroes PnL, peaks, notional"]
+    ROLL --> LH{"trailing loss halt?<br/>own-leg PnL at or below<br/>peak minus limit, bypass off"}
+    LH -- yes --> B2["daily loss halt"]
+    LH -- no --> OP{"open position or<br/>resting entry order?"}
+    OP -- yes --> B3["an open position/order<br/>already exists — max 1"]
+    OP -- no --> PN{"notional positive?"}
+    PN -- no --> B4["notional must be positive"]
+    PN -- yes --> TC{"notional within the effective<br/>per-trade cap?<br/>shares override, else usd override,<br/>else configured default"}
+    TC -- no --> B5["per-trade cap exceeded"]
+    TC -- yes --> BC{"bankroll cap enabled and<br/>today's buy notional + this entry<br/>over the cap?"}
+    BC -- yes --> B6["daily bankroll cap exceeded"]
+    BC -- no --> SG{"book ask and signal price known,<br/>and ask minus signal price<br/>over max entry slippage?"}
+    SG -- yes --> B7["entry slippage guard —<br/>the edge is gone"]
+    SG -- no --> OK["None — the entry may proceed"]
+    classDef blocked stroke:#d33,stroke-width:2px
+    classDef pass stroke:#2a2,stroke-width:3px
+    class B1,B2,B3,B4,B5,B6,B7 blocked
+    class OK pass
+```
+
+This is the code's actual check order (the same order as the table above,
+rows 1–7). The loss-halt bypass is consulted inside the halt check only — a
+bypassed halt still leaves every other gate armed, and the kill switch
+outranks the bypass.
+
 ## Architecture: read side vs write side
 
-```
-        READ SIDE (the trading loop)              WRITE SIDE (dashboard / CLI)
-  ┌───────────────────────────────────┐        ┌───────────────────────────────┐
-  │ strategy loop                     │        │ operator clicks a control     │
-  │   └─ gate.block_reason(req)       │        │   └─ controls.set_*(store, …) │
-  │      sync + pure over cached state│        │      plain key writes         │
-  └───────────────┬───────────────────┘        └───────────────┬───────────────┘
-                  │ syncs at named points:                     │
-                  │  load() / persist() /                      │
-                  │  refresh_overrides() /                     │
-                  │  refresh_runtime_limits()                  │
-                  ▼                                            ▼
-  ┌─────────────────────────────────────────────────────────────────────────────┐
-  │                     StateStore (async str key-value)                        │
-  │        InMemoryStateStore · SqliteStateStore · your own two methods         │
-  └─────────────────────────────────────────────────────────────────────────────┘
-
-  kill-switch file ──── orthogonal: checked directly on the filesystem,
-                        first, on every single block_reason() call
+```mermaid
+flowchart TB
+    subgraph READSIDE ["Read side — the trading loop"]
+        SL["strategy loop"] --> BR["gate.block_reason<br/>sync + pure over cached state"]
+    end
+    subgraph WRITESIDE ["Write side — dashboard / CLI"]
+        OP["operator clicks a control"] --> CT["controls free functions<br/>plain key writes"]
+    end
+    BR -- "syncs only at named points:<br/>load · persist ·<br/>refresh_overrides ·<br/>refresh_runtime_limits" --> ST[("StateStore<br/>async string key-value<br/>InMemoryStateStore · SqliteStateStore<br/>· your own two methods")]
+    CT --> ST
+    KF["kill-switch file"] -. "orthogonal — file stat checked first,<br/>on every single block_reason call" .- BR
 ```
 
 `block_reason()` is synchronous and pure over cached state — no store I/O on
