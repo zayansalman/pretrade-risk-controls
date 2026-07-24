@@ -38,7 +38,7 @@ class GateConfig:
     daily_loss_halt_usd: float
     bankroll_cap_usd: Optional[float]  # None / ≤0 → cap disabled
     max_entry_slippage: float
-    kill_switch_path: Path
+    kill_switch_path: Optional[Path] = None  # None → kill switch disabled
 
 
 @dataclass(frozen=True)
@@ -314,6 +314,8 @@ class RiskGate:
     # ------------------------------------------------------------------
 
     def kill_switch_active(self) -> bool:
+        if self.cfg.kill_switch_path is None:
+            return False
         return self.cfg.kill_switch_path.exists()
 
     def mark_kill_handled(self) -> None:
