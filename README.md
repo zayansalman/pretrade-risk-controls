@@ -87,8 +87,10 @@ Run the full narrated walkthrough: `python examples/demo.py`.
                         first, on every single block_reason() call
 ```
 
-`block_reason()` is synchronous and pure over cached state — no I/O on the hot
-path. The gate syncs with the store only at the named points above, so the
+`block_reason()` is synchronous and pure over cached state — no store I/O on
+the hot path (the kill-switch file stat is the one deliberate exception: a
+safety check must not depend on a refresh having run).
+The gate syncs with the store only at the named points above, so the
 loop decides when staleness is acceptable (in production: `refresh_*` every
 tick, `persist` on every counter change). The control plane and the gate never
 share an object; the store is the only channel between them.
