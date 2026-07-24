@@ -4,14 +4,25 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pretrade-gate"
-version = "1.0.0"
-description = "Pre-trade risk gate with a trailing daily-loss halt, extracted from a real-money trading system. Zero runtime dependencies."
+version = "2.0.0"
+description = "Venue-independent pre-trade risk controls: order validation, price bands, message throttles, position and exposure limits, and a trailing daily loss limit. Zero runtime dependencies."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "Zayan Khan" }]
-keywords = ["trading", "risk", "risk-management", "pre-trade", "kill-switch"]
+keywords = [
+    "trading",
+    "risk",
+    "risk-management",
+    "pre-trade",
+    "pre-trade-risk",
+    "ptrm",
+    "market-access",
+    "kill-switch",
+    "order-validation",
+    "trading-limits",
+]
 classifiers = [
     "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",

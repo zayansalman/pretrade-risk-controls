@@ -1,229 +1,509 @@
 # pretrade-gate
 
-Every order your bot wants to place answers one question first:
-`gate.block_reason(request)` — `None` means trade; a string tells the operator
-exactly why not.
+A venue-independent **pre-trade risk control layer**. Every order answers one
+question before it leaves the building:
 
-A venue-independent pre-trade risk gate with a **trailing daily-loss halt**,
-persisted daily counters, a file-based kill switch, and an operator control
-plane — extracted from a real-money automated trading system. Zero runtime
-dependencies; Python 3.11+.
+```python
+decision = engine.evaluate(order)
+```
+
+An accepted decision means send it. A rejected one carries a stable reject
+code, the limit that applied, and the value that breached it.
+
+Zero runtime dependencies; Python 3.11+.
 
 ```bash
-pip install -e .            # core: stdlib only
+pip install -e .            # core: standard library only
 pip install -e ".[sqlite]"  # adds the SQLite-backed store (aiosqlite)
 ```
 
-## Where it fits
+---
 
-```mermaid
-flowchart LR
-    S[Strategy plug-ins] --> R[pretrade-gate<br/>pre-trade risk]
-    D[Market data sources] --> E
-    R --> E[polymarket-ems<br/>execution engine<br/><i>in development</i>]
-    E --> V[(Polymarket CLOB)]
-    E --> L[(Ledger<br/>SQLite)]
-    L --> C[botdeck<br/>operator console]
-    L --> P[ledger-recon<br/>post-trade recon]
-    F[feedwatch<br/>feed health + incidents] -.observes.- D
-    F -.alerts.- C
-    classDef here stroke-width:3px,stroke:#2962ff
-    class R here
+## The modules, in plain English
+
+Eleven small modules. Each one does a single thing, and the boundaries between
+them are the seams you would swap when porting or embedding this.
+
+| Module | What it is |
+|---|---|
+| **`engine.py`** | The risk engine. Holds the limits and the day's counters, and runs every order through the controls in a fixed order. This is the module you call. |
+| **`limits.py`** | The limit set — one field per control. Anything left unset means that control is switched off. This is what a desk configures. |
+| **`order.py`** | The order being checked, plus the context the controls need: the touch, the session phase, the current position, how many orders are already working. |
+| **`decision.py`** | The answer. A stable reject code, the control that fired, the limit, the observed value, and a sentence for the operator. |
+| **`controls.py`** | The operator control plane — suspend a limit, resize a cap, re-arm after a halt. Writes the store; never touches a running engine. |
+| **`store.py`** | The persistence contract: get, get many, set, set many, over strings. A dictionary satisfies it; so does a database. |
+| **`sqlite_store.py`** | A SQLite implementation of that contract, with atomic batch writes. The only module with a third-party import. |
+| **`keys.py`** | The list of every key written to the store, and what each one holds. |
+| **`clock.py`** | Time, as an injected dependency, plus the trading-day calculation. Lets tests drive time-based controls exactly, and keeps the day boundary off UTC midnight where a venue needs it. |
+| **`encoding.py`** | How numbers are written to and read from the store, specified explicitly rather than inherited from Python. |
+| **`windows.py`** | The trailing-window counters behind the duplicate and message-rate controls. |
+
+Read them in that order and the library makes sense end to end.
+
+---
+
+## What it checks
+
+Twenty-four controls, in the order every order walks them. The first one to
+object wins, and its code goes back to the caller.
+
+| # | Control | Rejects when | Code |
+|---|---|---|---|
+| 1 | Kill switch | the kill file exists — outranks everything, including an active bypass | `KILL_SWITCH_ENGAGED` |
+| 2 | Daily loss limit | realized P&L has drawn down to the trailing floor | `LOSS_LIMIT_BREACHED` |
+| 3 | Instrument universe | the instrument is outside the permitted set | `INSTRUMENT_NOT_PERMITTED` |
+| 4 | Restricted list | the instrument is restricted — blackout, information barrier | `INSTRUMENT_RESTRICTED` |
+| 5 | Session state | the venue phase does not permit order entry | `MARKET_SESSION_NOT_OPEN` |
+| 6 | Short sale locate | a short sale carries no secured borrow | `SHORT_SALE_LOCATE_MISSING` |
+| 7 | Order quantity | quantity is zero or negative | `ORDER_QUANTITY_NOT_POSITIVE` |
+| 8 | Order price | a limit price is zero or negative | `ORDER_PRICE_NOT_POSITIVE` |
+| 9 | Order notional | the priced notional is zero or negative | `ORDER_NOTIONAL_NOT_POSITIVE` |
+| 10 | Maximum order quantity | the clip is larger than any single order should be | `MAX_ORDER_QUANTITY_EXCEEDED` |
+| 11 | Maximum order notional | the clip is worth more than any single order should be | `MAX_ORDER_NOTIONAL_EXCEEDED` |
+| 12 | Quote age | the quotes the price controls depend on are stale | `MARKET_DATA_STALE` |
+| 13 | Price band | the limit price is too far from the reference, either way | `PRICE_BAND_EXCEEDED` |
+| 14 | Execution slippage | the market has moved against the decision price | `EXECUTION_SLIPPAGE_EXCEEDED` |
+| 15 | Duplicate order | an identical order went out moments ago | `DUPLICATE_ORDER` |
+| 16 | Order rate | too many orders inside the trailing window | `ORDER_RATE_EXCEEDED` |
+| 17 | Consecutive rejections | the venue keeps refusing and the strategy keeps trying | `CONSECUTIVE_REJECT_LIMIT_EXCEEDED` |
+| 18 | Repeated execution throttle | the strategy has traded N times without a human looking at it | `REPEATED_EXECUTION_THROTTLE` |
+| 19 | Working orders | too many orders already live at the venue | `MAX_WORKING_ORDERS_EXCEEDED` |
+| 20 | Open positions | too many instruments already held | `MAX_OPEN_POSITIONS_EXCEEDED` |
+| 21 | Position limit | the order would push the instrument outside its position limit | `MAX_POSITION_EXCEEDED` |
+| 22 | Self-match prevention | the firm's own quantity rests on the other side | `SELF_MATCH_PREVENTED` |
+| 23 | Gross exposure | portfolio gross exposure would exceed its limit | `GROSS_EXPOSURE_LIMIT_EXCEEDED` |
+| 24 | Daily notional limit | the day's cumulative notional would exceed its limit | `DAILY_NOTIONAL_LIMIT_EXCEEDED` |
+
+Plus `MARKET_DATA_UNAVAILABLE`, which any armed price control returns when the
+data it needs did not arrive — see *Fail-closed inputs* below.
+
+A limit set is mostly unset fields, so "what is actually live right now" is
+the first question an operator asks. Ask the engine rather than reading the
+configuration — for the limits in the quickstart below:
+
+```python
+>>> engine.armed_controls()
+('daily loss limit', 'session state', 'order quantity', 'order price',
+ 'order notional', 'maximum order quantity', 'maximum order notional',
+ 'quote age', 'price band', 'execution slippage', 'duplicate order',
+ 'order rate', 'position limit', 'daily notional limit')
 ```
 
-Standalone siblings extracted from the same trading system:
-[pretrade-gate](https://github.com/zayansalman/pretrade-gate) — this repo,
-[ledger-recon](https://github.com/zayansalman/ledger-recon),
-[feedwatch](https://github.com/zayansalman/feedwatch), and
-[botdeck](https://github.com/zayansalman/botdeck).
+---
+
+## Does this cover what a trading desk needs?
+
+Partly, and the honest answer is worth more than a longer feature list. A
+desk's pre-trade obligations are layered across the strategy, the order
+management system, the executing broker, the venue's own risk gateway and the
+clearing member. This library is one layer of that stack — the one that sits
+between a strategy and the order it wants to send — and it should not pretend
+to be the others.
+
+**Covered here.** Order validation and fat-finger caps, price reasonableness,
+message conduct (duplicates, rate, repeated execution), position and exposure
+limits, instrument eligibility and restricted lists, session state, short-sale
+locate, capital preservation via a trailing loss limit and a daily notional
+budget, a kill switch, and bounded, attributed operator overrides. These map
+onto the pre-trade controls named in the market access and algorithmic trading
+rulebooks — maximum order value and volume, price collars, maximum message
+limits, repeated automated execution throttles, kill functionality, erroneous
+and duplicative order prevention, and restricted-security checks.
+
+**Covered here, but only as good as what you supply.** Position, working
+orders, gross exposure, session phase, quote age, locate status and the firm's
+own resting quantity all arrive on the request. The library checks them; your
+order management system is authoritative for them. It keeps no shadow copy of
+your book on purpose — a risk control that disagrees with the book of record
+is worse than no control.
+
+**Deliberately elsewhere.** These belong to other layers, and a venue-neutral
+library with no market data feed, no reference data and no clearing connection
+cannot do them honestly:
+
+| Not here | Where it belongs |
+|---|---|
+| Credit, margin and buying-power checks | clearing broker or the venue's own risk gateway, which know the account |
+| Regulatory position limits and accountability levels | compliance system with contract reference data |
+| Participation caps as a share of average daily volume | anything with market data history |
+| Price bands, limit up / limit down, trading halts | the venue — feed the outcome in as `session_state` |
+| Cancel on disconnect, cancel on kill | the session layer that owns the venue connection |
+| Drop copy, post-trade surveillance, wash-trade detection | post-trade systems |
+| Order tagging: algorithm IDs, short codes, legal entity identifiers, trading capacity | the order management system that builds the outbound message |
+| Clock synchronisation to a traceable source | infrastructure |
+| Sanctions and client screening | onboarding |
+| Best execution analysis | post-trade |
+| Four- and six-eye approval workflow for limit changes | the console that calls this library's control plane |
+
+Treat the middle table as the integration checklist and the right-hand column
+as the map of what still needs an owner.
+
+**Where the control set comes from.** The list above is not invented. It is
+the intersection of what the following require or recommend and what a
+venue-independent library can honestly do:
+
+- **SEC Rule 15c3-5**, the market access rule. Paragraph (c)(1) requires
+  controls that prevent erroneous orders "by rejecting orders that exceed
+  appropriate price or size parameters, on an order-by-order basis or over a
+  short period of time, or that indicate duplicative orders" — the order size
+  caps, the price band and the duplicate control. Paragraph (c)(2) requires
+  preventing orders in securities the firm or customer is restricted from
+  trading — the restricted list.
+- **MiFID II RTS 6** (Commission Delegated Regulation (EU) 2017/589),
+  Article 15, which names five pre-trade controls: price collars, maximum
+  order values, maximum order volumes, maximum message limits, and repeated
+  automated execution throttles. Article 12 covers kill functionality.
+- **FIA and the FIA Principal Traders Group** guidance on automated trading
+  systems, whose recommended controls include message and execution throttles,
+  price collars, maximum order sizes, maximum intraday positions, limits on an
+  order's deviation from a reference price, limits on how many times an
+  algorithm may re-enter the market without human intervention, and order
+  cancellation capability.
+- **Reg SHO** for the short-sale locate requirement.
+
+The gaps in the third table are gaps in what a library at this layer can see,
+not gaps in the standards.
+
+---
 
 ## Quickstart
 
 ```python
 import asyncio
-from pretrade_gate import EntryRequest, GateConfig, InMemoryStateStore, RiskGate
+
+from pretrade_gate import (
+    InMemoryStateStore, OrderRequest, PreTradeRiskEngine,
+    RiskLimits, SessionState, Side,
+)
 
 
 async def main():
-    cfg = GateConfig(
-        max_trade_usd=25.0,  # per-trade clip cap
-        daily_loss_halt_usd=50.0,  # trailing drawdown limit from the session peak
-        bankroll_cap_usd=200.0,  # cumulative daily BUY notional cap (None = off)
-        max_entry_slippage=0.02,  # max ask drift vs the signal price
-        kill_switch_path=None,  # a Path blocks everything while the file exists
+    limits = RiskLimits(
+        daily_loss_limit_usd=500.0,        # trailing drawdown from the session peak
+        daily_notional_limit_usd=50_000.0,  # cumulative notional for the day
+        max_order_quantity=1_000.0,
+        max_order_notional_usd=10_000.0,
+        price_band_fraction=0.03,           # 3% either side of the reference
+        max_execution_slippage=0.05,        # adverse drift from the decision price
+        max_quote_age_millis=1_000,
+        duplicate_window_millis=5_000,
+        max_orders_per_window=20,
+        max_position_quantity=2_000.0,
+        tradeable_session_states=frozenset({SessionState.OPEN}),
+        kill_switch_path=None,              # a Path blocks everything while it exists
     )
-    gate = RiskGate(cfg, InMemoryStateStore(), is_live=True)
-    await gate.load()  # rebuild today's counters from the store
+    engine = PreTradeRiskEngine(limits, InMemoryStateStore(), is_live=True)
+    await engine.load()          # rebuild today's counters
+    await engine.refresh_overrides()
 
-    req = EntryRequest(
-        notional_usd=20.0,
-        position_open=False,
-        entry_order_resting=False,
-        side_price=0.55,
-        best_ask=0.56,
+    order = OrderRequest(
+        symbol="ACME",
+        side=Side.BUY,
+        quantity=100.0,
+        limit_price=10.00,
+        decision_price=10.00,
+        best_bid=9.99,
+        best_ask=10.01,
+        quote_age_millis=20,
+        session_state=SessionState.OPEN,
     )
-    reason = gate.block_reason(req)
-    print("trade" if reason is None else f"blocked: {reason}")
 
-    await gate.record_realized_pnl(-12.5, is_live=True)  # closes feed the halt
-    await gate.record_buy_notional(20.0)  # entries feed the bankroll cap
+    decision = engine.evaluate(order)
+    if decision:
+        # ... send the order, then tell the engine what you did
+        engine.record_order_sent(order)      # feeds the rate and duplicate windows
+        notional = order.notional_usd()      # None only if the order cannot be priced
+        if notional is not None:
+            await engine.record_notional(notional)
+    else:
+        print(decision.code.value, decision.message)
+
+    await engine.record_execution()                       # a fill
+    await engine.record_realized_pnl(-125.0, is_live=True)  # a close
 
 
 asyncio.run(main())
 ```
 
-Run the full narrated walkthrough: `python examples/demo.py`.
+Run the narrated walkthrough of a full session: `python examples/demo.py`.
 
-## What it protects against
+---
 
-| # | Gate | Protects against |
-|---|------|------------------|
-| 1 | Kill switch (file) | anything — one `touch KILL` halts every entry, bypass included |
-| 2 | Trailing daily-loss halt | bleeding banked gains back; a losing day past the limit |
-| 3 | One-position rule | stacking entries / doubling into an unfilled resting order |
-| 4 | Positive-notional check | sign bugs and zero-size orders reaching the venue |
-| 5 | Per-trade cap (+ runtime overrides) | fat-finger sizing; resizing the clip needs no restart |
-| 6 | Daily bankroll cap | a runaway loop spending the whole bankroll in one day |
-| 7 | Entry slippage guard | paying a price the signal never saw (the edge is gone) |
-| 8 | Persisted counters | a restart quietly resetting the halt or re-granting bankroll |
+## Where it fits
+
+```mermaid
+flowchart LR
+    S[Strategies] --> R[pretrade-gate<br/>pre-trade risk controls]
+    D[Market data] --> E
+    R --> E[Execution / order routing]
+    E --> V[(Trading venue)]
+    E --> L[(Ledger)]
+    L --> C[Operator console]
+    L --> P[Post-trade reconciliation]
+    F[Feed health monitoring] -.observes.- D
+    F -.alerts.- C
+    classDef here stroke-width:3px,stroke:#2962ff
+    class R here
+```
+
+Standalone components extracted from the same trading system:
+[pretrade-gate](https://github.com/zayansalman/pretrade-gate) — this repository,
+[ledger-recon](https://github.com/zayansalman/ledger-recon) (post-trade
+reconciliation),
+[feedwatch](https://github.com/zayansalman/feedwatch) (feed health and
+incidents), and
+[botdeck](https://github.com/zayansalman/botdeck) (operator console).
+
+---
 
 ## The decision path
 
-Every entry — paper or live — walks the same sequence inside
-`RiskGate.block_reason()`. The first tripped gate wins: its reason string goes
-back to the caller verbatim and becomes the operator's log line. `None` is the
-only green light.
-
 ```mermaid
 flowchart TD
-    REQ["EntryRequest<br/>notional, position flags,<br/>signal price, book ask"] --> KS{"kill-switch<br/>file exists?"}
-    KS -- yes --> B1["KILL switch active"]
-    KS -- no --> ROLL["roll UTC daily window<br/>a new day zeroes PnL, peaks, notional"]
-    ROLL --> LH{"trailing loss halt?<br/>own-leg PnL at or below<br/>peak minus limit, bypass off"}
-    LH -- yes --> B2["daily loss halt"]
-    LH -- no --> OP{"open position or<br/>resting entry order?"}
-    OP -- yes --> B3["an open position/order<br/>already exists — max 1"]
-    OP -- no --> PN{"notional positive?"}
-    PN -- no --> B4["notional must be positive"]
-    PN -- yes --> TC{"notional within the effective<br/>per-trade cap?<br/>shares override, else usd override,<br/>else configured default"}
-    TC -- no --> B5["per-trade cap exceeded"]
-    TC -- yes --> BC{"bankroll cap enabled and<br/>today's buy notional + this entry<br/>over the cap?"}
-    BC -- yes --> B6["daily bankroll cap exceeded"]
-    BC -- no --> SG{"book ask and signal price known,<br/>and ask minus signal price<br/>over max entry slippage?"}
-    SG -- yes --> B7["entry slippage guard —<br/>the edge is gone"]
-    SG -- no --> OK["None — the entry may proceed"]
+    REQ["OrderRequest"] --> A{"kill switch<br/>engaged?"}
+    A -- yes --> RJ1["KILL_SWITCH_ENGAGED"]
+    A -- no --> B{"loss limit<br/>breached?"}
+    B -- yes --> RJ2["LOSS_LIMIT_BREACHED"]
+    B -- no --> C{"instrument and<br/>session eligible?"}
+    C -- no --> RJ3["INSTRUMENT_* /<br/>MARKET_SESSION_NOT_OPEN /<br/>SHORT_SALE_LOCATE_MISSING"]
+    C -- yes --> D{"order well formed<br/>and within its caps?"}
+    D -- no --> RJ4["ORDER_* /<br/>MAX_ORDER_*_EXCEEDED"]
+    D -- yes --> E{"quotes fresh and<br/>price reasonable?"}
+    E -- no --> RJ5["MARKET_DATA_* /<br/>PRICE_BAND_EXCEEDED /<br/>EXECUTION_SLIPPAGE_EXCEEDED"]
+    E -- yes --> F{"message conduct<br/>within limits?"}
+    F -- no --> RJ6["DUPLICATE_ORDER /<br/>ORDER_RATE_EXCEEDED /<br/>*_THROTTLE"]
+    F -- yes --> G{"position and exposure<br/>within limits?"}
+    G -- no --> RJ7["MAX_POSITION_EXCEEDED /<br/>GROSS_EXPOSURE_* /<br/>DAILY_NOTIONAL_*"]
+    G -- yes --> OK["accepted"]
     classDef blocked stroke:#d33,stroke-width:2px
     classDef pass stroke:#2a2,stroke-width:3px
-    class B1,B2,B3,B4,B5,B6,B7 blocked
+    class RJ1,RJ2,RJ3,RJ4,RJ5,RJ6,RJ7 blocked
     class OK pass
 ```
 
-This is the code's actual check order (the same order as the table above,
-rows 1–7). The loss-halt bypass is consulted inside the halt check only — a
-bypassed halt still leaves every other gate armed, and the kill switch
-outranks the bypass.
+The ordering is not arbitrary. Absolute stops come first — a kill switch and a
+breached loss limit end the conversation whatever the order says. Eligibility
+follows, because an instrument the desk may not trade is settled without
+pricing anything. Then the order's own well-formedness, then the price
+controls that depend on it, then message conduct, and last the position and
+exposure controls, which need the caller's book context. Cheapest and most
+absolute first; most contextual last.
 
-## Architecture: read side vs write side
+The sequence lives in `CONTROL_SEQUENCE` as data rather than as a chain of
+`if` statements, so it can be read, tested and copied verbatim by a port.
+
+---
+
+## Read side, write side
 
 ```mermaid
 flowchart TB
-    subgraph READSIDE ["Read side — the trading loop"]
-        SL["strategy loop"] --> BR["gate.block_reason<br/>sync + pure over cached state"]
+    subgraph READ ["Read side — the trading process"]
+        SL["strategy"] --> BR["engine.evaluate<br/>synchronous, cached state"]
     end
-    subgraph WRITESIDE ["Write side — dashboard / CLI"]
-        OP["operator clicks a control"] --> CT["controls free functions<br/>plain key writes"]
+    subgraph WRITE ["Write side — risk console or command line"]
+        OP["operator acts"] --> CT["controls<br/>plain key writes"]
     end
-    BR -- "syncs only at named points:<br/>load · persist ·<br/>refresh_overrides ·<br/>refresh_runtime_limits" --> ST[("StateStore<br/>async string key-value<br/>InMemoryStateStore · SqliteStateStore<br/>· your own two methods")]
+    BR -- "syncs only at named points:<br/>load · persist · refresh_overrides" --> ST[("StateStore<br/>get · get_many · set · set_many<br/>in-memory · SQLite · your own")]
     CT --> ST
-    KF["kill-switch file"] -. "orthogonal — file stat checked first,<br/>on every single block_reason call" .- BR
+    KF["kill switch file"] -. "stat'd on every single evaluation" .- BR
 ```
 
-`block_reason()` is synchronous and pure over cached state — no store I/O on
-the hot path (the kill-switch file stat is the one deliberate exception: a
-safety check must not depend on a refresh having run).
-The gate syncs with the store only at the named points above, so the
-loop decides when staleness is acceptable (in production: `refresh_*` every
-tick, `persist` on every counter change). The control plane and the gate never
-share an object; the store is the only channel between them.
+`evaluate()` is synchronous and reads only cached state, so no store round
+trip sits on the order path. The engine synchronises at points the caller
+chooses, which leaves the caller deciding how stale an override may be. The
+kill switch is the one deliberate exception: it stats its file on every
+evaluation, because a control that only takes effect after a refresh has run
+is not a kill switch.
+
+The control plane and the engine never share an object. The store is the only
+channel between them.
+
+---
 
 ## Design decisions
 
-**Trailing high-water mark, not a fixed floor.** The halt fires when the
-mode's own realized PnL draws down to `peak − limit`. Banked gains are locked:
-after a +$30 run with a $10 limit you can give back $10, not $40. A
-never-profitable session keeps `peak = 0`, so the floor degrades EXACTLY to
-the old fixed `−limit` behaviour — this equivalence is pinned by a test.
+**A trailing limit, not a fixed floor.** The loss limit fires when the mode's
+realized P&L draws down to `peak − limit`. Banked gains are protected: after a
+session that reached +800 with a 500 limit, the halt sits at +300, not at
+−500. A session that was never profitable keeps `peak = 0`, so the floor
+degrades exactly to a plain `−limit` — the equivalence is pinned by a test.
 
-**Live/paper split, one code path.** Paper must preview live faithfully, so
-both modes run the SAME `block_reason` — drift between them is the bug the
-unified gate exists to prevent. But the halt reads the mode's OWN PnL leg:
-paper study losses never halt real money, and vice versa.
+**Live and simulated share one path.** Both run the same `evaluate`, because
+a simulation permitted things live would refuse is not a preview of anything.
+But the loss limit reads its own leg: simulated losses never halt the live
+book, and live losses never halt a simulation.
 
-**Reset clears peaks, not just PnL.** Zeroing PnL alone cannot clear a
-trailing halt: with a banked +$30 peak the floor sits at +$20, so PnL 0 is
-still below it and you stay halted. `reset_daily_loss_halt` therefore zeroes
-both legs' PnL *and* both peaks, and deliberately leaves the date and the
-bankroll-cap notional alone.
+**Fail-closed inputs.** An armed control that cannot be evaluated rejects. If
+a price band is configured and no reference price arrives, the answer is
+`MARKET_DATA_UNAVAILABLE`, not a quiet pass. The alternative is the failure
+where a desk believes it is protected by a control that stopped firing months
+ago when its input stopped arriving. If a control should not apply, leave its
+limit unset — do not starve it of data.
 
-**An injected string key-value store.** The gate persists through two async
-methods (`get`/`set` of strings). That makes the persistence seam trivially
-swappable (dict in tests, SQLite in production, Redis if you outgrow a file),
-keeps the core dependency-free, and forces every persisted value through one
-documented schema (`keys.py`). Cleared-but-present is encoded as `""` — the
-contract pins that `""` round-trips as `""`, never `None`.
+**No implicit limits.** Every limit defaults to unset, and unset means off.
+A default limit is a limit nobody chose, and a risk limit nobody chose is one
+nobody owns. Configuring the field is the act of turning the control on.
 
-**Fail-safe defaults.** Absent or corrupt state always degrades toward MORE
-protection: a missing peak derives as `max(0, pnl)` (fixed-floor behaviour), a
-non-numeric override reads as unset, a stale date starts the day fresh. The
-parent system learned this the hard way: when its loss-halt bypass was widened
-from paper-only to both modes, a bypass flag left ON by an old paper study
-would have silently disabled the real-money halt — so the rollout shipped a
-one-shot, sentinel-guarded migration that cleared the stale flag exactly once
-while guaranteeing a later deliberate bypass was never wiped. That migration
-belongs to the parent's history and is not in this library, but its lesson is:
-every default here starts halt-ON.
+**Bypasses expire.** The control plane will not write a suspension without a
+duration, an authoriser and a reason. An expiring bypass fails in the safe
+direction: if the operator is unreachable and the console is down, the limit
+re-arms itself. Turning it back on requires no action; leaving it off does.
+
+**A position limit never traps a position.** If the book is already outside a
+limit — it was lowered, an unexpected fill landed — an order that strictly
+reduces the position without flipping its sign is still permitted. A position
+limit must never be the reason a desk cannot trade out of the position that is
+breaching it.
+
+**The trading day is not the calendar day.** Futures sessions roll in the
+evening of the preceding date. `session_roll_millis` puts the counter boundary
+where the venue puts it, so the day's loss limit does not reset in the middle
+of a live evening session. Left at zero, it is a plain UTC day.
+
+**Throttle counters survive a restart; message windows do not.** A
+crash-restart loop must not earn itself a fresh allowance of rejections, so
+the reject and execution counts are persisted. The rate and duplicate windows
+describe what a live session has just sent, and a process that restarted has
+sent nothing — reloading a stale burst would reject the first legitimate
+orders of the new session.
+
+**Fail-safe defaults everywhere.** Absent or damaged state always degrades
+toward more protection: a missing high water mark derives as `max(0, pnl)`, a
+non-numeric override reads as unset, a bypass flag with no expiry reads as
+inactive, a stale trading date starts the day fresh.
+
+---
 
 ## Operator control plane
 
-Free functions over a bare store handle — callable from a process that has no
-gate at all:
+Free functions over a bare store handle, callable from a process that holds no
+engine at all:
 
 ```python
 from pretrade_gate import (
-    set_loss_halt_bypass,
-    reset_daily_loss_halt,
-    set_runtime_max_trade_usd,
-    set_runtime_trade_shares,
+    bypass_loss_limit, clear_loss_limit_bypass, read_loss_limit_bypass,
+    reset_daily_loss_limit, set_runtime_max_order_notional,
 )
 
-await set_loss_halt_bypass(store, True)  # gate honours it on next refresh_overrides()
-await set_runtime_max_trade_usd(store, 10.0)  # resize the clip without a restart
-await set_runtime_trade_shares(store, 8.0)  # share-denominated size; wins over the $ cap
-await reset_daily_loss_halt(store)  # stopped bots only — see the docstring
+# Suspend the loss limit — bounded, attributed, and self-reversing.
+await bypass_loss_limit(
+    store,
+    duration_millis=15 * 60_000,
+    actor="risk.manager",
+    reason="unwinding an illiquid position after the halt",
+)
+
+record = await read_loss_limit_bypass(store)   # who, why, when, until
+
+await set_runtime_max_order_notional(store, 2_500.0)   # resize without a restart
+await clear_loss_limit_bypass(store, actor="risk.manager")
+await reset_daily_loss_limit(store)             # stopped engines only — see the docstring
 ```
 
-## Limitations (read before trusting it with money)
+Every change takes effect on the engine's next `refresh_overrides()`.
 
-- **Single process, single instrument.** One gate per store namespace; no
-  portfolio view, no cross-instrument netting. Wrap the store with a key
-  prefix if you run several gates against one backend.
-- **The multi-key `persist()` is not atomic.** Six sequential single-key
-  writes, date first — preserved exactly from the production system so crash
-  behaviour is unchanged. A crash mid-persist can leave keys from two
-  snapshots; every partial state still loads fail-safe (see above), but if
-  you need transactional persistence, put it inside your `StateStore`.
-- **Not position sizing, not portfolio risk.** The gate answers "may this
-  entry happen?" — it does not decide how large the entry should be, hedge
-  anything, or measure exposure.
+---
+
+## Porting to another language
+
+Python is not the usual choice for this layer, and the library is written so a
+port is a transcription rather than a redesign. The conventions that make that
+true:
+
+**Numbers.** All monetary and quantity arithmetic is IEEE-754 binary64, which
+every target language has. Comparisons against limits are inclusive at the
+boundary (`<=` passes) and that is asserted by tests, so a port can reproduce
+the boundary exactly. If you move to a decimal or fixed-point currency type,
+keep the same comparison direction.
+
+**Persisted values.** Floats are written with 17 significant digits (`%.17g`),
+the shortest fixed precision that round-trips a binary64 exactly and the one
+format every C-style `printf` renders identically. Language-default float
+formatting does not agree across languages and must not be used here.
+
+**Parsing.** The accepted number grammar is stated explicitly in
+`encoding.py` and enforced with a regular expression, because host float
+parsers are more permissive than the format and disagree with each other —
+Python's `float()` takes `nan`, `infinity` and `1_0`; C's `strtod` also takes
+hex floats. Two details a port must copy: match ASCII `[0-9]` rather than
+`\d`, and anchor with `\A`/`\Z` rather than `^`/`$`, since `$` also matches
+before a trailing newline.
+
+**Time.** Whole milliseconds since the UNIX epoch, as an integer, through an
+injected clock. No language-specific date type crosses a seam. The trading-day
+calculation needs only integer arithmetic and a UTC epoch-to-date conversion —
+no timezone database.
+
+**The store.** Four methods over strings: `get`, `get_many`, `set`,
+`set_many`. Batching is part of the interface rather than a capability to
+sniff for at runtime, so a port has one interface to implement and a backend
+that can commit atomically simply does.
+
+**Reject codes.** Stable `UPPER_SNAKE_CASE` string values, not enum ordinals
+and not prose. The message wording may change in any release; the code may
+not. Route on the code.
+
+**Control order.** `CONTROL_SEQUENCE` is an array of `(name, is-armed,
+check)`. Copy the array; do not re-derive the order from control flow.
+
+**Structure.** The decision path is synchronous and allocation-light, and only
+the persistence seam is asynchronous — so a port can make the store blocking,
+callback-based or coroutine-based to suit its runtime without touching the
+controls. Nothing on the decision path raises; rejections are return values.
+Configuration errors raise, and they raise at construction, not at the first
+order of the day.
+
+---
+
+## Limitations
+
+Read these before trusting it with money.
+
+- **One engine, one book, one store namespace.** No cross-instrument netting
+  beyond the gross exposure figure you supply. Wrap the store with a key
+  prefix to run several engines against one backend.
+- **It does not keep your positions.** Position, working orders and exposure
+  arrive on each request. If the caller supplies stale values, the controls
+  that read them are stale too.
+- **Market orders are not collared.** A market order carries no price to band
+  check, so it is constrained only by the quantity and notional caps and by
+  the venue's own bands. A caller that routes around the price band by sending
+  market orders will succeed.
+- **The loss limit is realized P&L only.** Open positions are not marked to
+  market, so an unrealized drawdown does not halt anything until it is closed.
+- **Message windows are per process.** Two processes sharing a store do not
+  share a rate limit; the venue sees their sum.
+- **The engine's own limits are not the venue's.** Nothing here replaces the
+  broker's or the venue's own pre-trade risk gateway, and nothing here is a
+  substitute for the credit and capital controls that layer owns.
+
+---
+
+## Naming
+
+The industry term for this component is *pre-trade risk controls*, and
+exchanges and vendors ship it under the name *Pre-Trade Risk Management*
+(PTRM). "Pre-trade" here is exactly the standard term; "gate" is the
+colloquial half — a desk would more likely say controls, checks or gateway.
+The repository name is kept for continuity with the components it was
+extracted alongside, and the documentation uses the standard vocabulary
+throughout.
+
+---
 
 ## Provenance
 
-This exact logic gated every live and paper order of a real-money automated
-trading system — the block-reason strings, the gate ordering, the trailing
-halt arithmetic, and the non-atomic persist order are unchanged from
-production. The extraction swapped a hard-wired SQLite config table for the
-injected `StateStore`, deleted the parent's stored-state migrations (a fresh
-library has nothing to migrate), and made the kill-switch path optional. The
-43-test paper/live parity suite came with it.
+This began as the risk layer of a live automated trading system, where an
+earlier version of the trailing loss limit, the kill switch and the persisted
+daily counters gated every order. That system's lesson is the one written
+through this library: every default starts with the control armed. When its
+loss-limit bypass was widened from simulation-only to both modes, a flag left
+on by an old simulation run would have silently disarmed the real-money limit.
+That is why bypasses here cannot be written without an expiry.
+
+The extraction replaced a hard-wired configuration table with the injected
+store, and the rework since then generalised a single-instrument, one-position
+gate into the control set above.
 
 MIT licensed.
