@@ -1,7 +1,8 @@
-# pretrade-risk
+# polymarket-pretrade-risk-controls
 
-A venue-independent **pre-trade risk control layer**. Every order answers one
-question before it leaves the building:
+A **pre-trade risk control layer**, built for a Polymarket trading desk and
+venue-independent by construction. Every order answers one question before it
+leaves the building:
 
 ```python
 decision = engine.evaluate(order)
@@ -16,6 +17,18 @@ Zero runtime dependencies; Python 3.11+.
 pip install -e .            # core: standard library only
 pip install -e ".[sqlite]"  # adds the SQLite-backed store (aiosqlite)
 ```
+
+```python
+from pretrade_risk import PreTradeRiskEngine, RiskLimits, OrderRequest
+```
+
+> **On the name.** The Polymarket prefix records where these controls come
+> from and what they run against — not a coupling in the code. There is no
+> venue-specific logic anywhere in this library: no Polymarket client, no
+> assumption that prices are bounded by 1, no binary-contract arithmetic. It
+> takes an order and some context, and returns a decision. Point it at
+> equities, futures or FX and every control still applies. See
+> [Naming](#naming) for why the distribution and the import package differ.
 
 ---
 
@@ -237,10 +250,10 @@ Run the narrated walkthrough of a full session: `python examples/demo.py`.
 
 ```mermaid
 flowchart LR
-    S[Strategies] --> R[pretrade-risk<br/>pre-trade risk controls]
+    S[Strategies] --> R["polymarket-pretrade-risk-controls<br/>pre-trade risk controls"]
     D[Market data] --> E
     R --> E[Execution / order routing]
-    E --> V[(Trading venue)]
+    E --> V[(Polymarket CLOB<br/>or any venue)]
     E --> L[(Ledger)]
     L --> C[Operator console]
     L --> P[Post-trade reconciliation]
@@ -250,8 +263,11 @@ flowchart LR
     class R here
 ```
 
+The venue box is the only Polymarket-shaped thing in that picture, and this
+library does not talk to it — the execution layer does.
+
 Standalone components extracted from the same trading system:
-`pretrade-risk` — this repository,
+`polymarket-pretrade-risk-controls` — this repository,
 [ledger-recon](https://github.com/zayansalman/ledger-recon) (post-trade
 reconciliation),
 [feedwatch](https://github.com/zayansalman/feedwatch) (feed health and
@@ -497,24 +513,46 @@ and MiFID II RTS 6 calls the checks themselves "pre-trade controls".
 This project was previously called `pretrade-gate`. "Pre-trade" was already
 the standard term, but "gate" was the colloquial half: a desk says controls,
 checks or gateway, and in real documentation "gateway" names the interface a
-participant connects to rather than the check it performs. The name is now
-`pretrade-risk`, the import package is `pretrade_risk`, and persisted state
-lives under `pretrade.*`.
+participant connects to rather than the check it performs — Nasdaq's
+participant-facing component is the "PTRM Gateway", and Exegy sells "market
+access gateways". A repository called `pretrade-gate` reads, to someone in the
+field, like connectivity rather than risk logic.
+
+So the distribution is now `polymarket-pretrade-risk-controls`: the venue it
+was built for, then the industry's own phrase for what it is.
+
+**The import package stays short: `pretrade_risk`.** A distribution name and
+an import name are allowed to differ in Python and routinely do —
+`scikit-learn` imports as `sklearn`, `beautifulsoup4` as `bs4`,
+`python-dateutil` as `dateutil`. The alternative here would put
+`polymarket_pretrade_risk_controls` at the head of every import line, which
+costs 33 characters of every call site to restate what the package metadata
+already says. The long name belongs on the tin; the short one belongs in the
+code.
+
+Persisted state lives under `pretrade.*`, unchanged — it is an internal
+namespace, and a venue prefix on a state key would be misleading in exactly
+the way the code is not.
 
 ---
 
 ## Provenance
 
-This began as the risk layer of a live automated trading system, where an
-earlier version of the trailing loss limit, the kill switch and the persisted
-daily counters gated every order. That system's lesson is the one written
-through this library: every default starts with the control armed. When its
-loss-limit bypass was widened from simulation-only to both modes, a flag left
-on by an old simulation run would have silently disarmed the real-money limit.
-That is why bypasses here cannot be written without an expiry.
+This began as the risk layer of a live automated trading system running on
+Polymarket, where an earlier version of the trailing loss limit, the kill
+switch and the persisted daily counters sat in front of every order. That
+system's lesson is the one written through this library: every default starts
+with the control armed. When its loss-limit bypass was widened from
+simulation-only to both modes, a flag left on by an old simulation run would
+have silently disarmed the limit on the live book. That is why bypasses here
+cannot be written without an expiry.
 
 The extraction replaced a hard-wired configuration table with the injected
-store, and the rework since then generalised a single-instrument,
-one-position-at-a-time check into the control set above.
+store. The rework since then generalised a single-instrument,
+one-position-at-a-time check into the control set above — and in doing so
+removed the last venue-specific assumption in the code, a share-denominated
+order cap that relied on binary-contract prices being below 1. Order size is
+now quantity and notional, checked independently, the way every other market
+expresses it.
 
 MIT licensed.

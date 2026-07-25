@@ -1,8 +1,13 @@
-"""A venue-independent pre-trade risk control layer with pluggable persistence.
+"""A pre-trade risk control layer with pluggable persistence.
 
 Every order answers one question before it leaves the building:
 ``engine.evaluate(order)`` — an accepted decision means send it, a rejected one
 carries a stable code, the limit that applied, and the value that breached it.
+
+Distributed as ``polymarket-pretrade-risk-controls``, imported as
+``pretrade_risk``. The distribution name records the desk these controls were
+built for; the code itself is venue-independent and holds no venue-specific
+logic, so the import name does not carry the venue.
 
 The SQLite-backed store lives in :mod:`pretrade_risk.sqlite_store` and is
 imported explicitly, so the package root stays importable without the optional
