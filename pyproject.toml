@@ -11,29 +11,11 @@ requires-python = ">=3.11"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "Zayan Khan" }]
-keywords = [
-    "trading",
-    "risk",
-    "risk-management",
-    "pre-trade",
-    "pre-trade-risk",
-    "pre-trade-risk-controls",
-    "ptrm",
-    "market-access",
-    "kill-switch",
-    "order-validation",
-    "trading-limits",
-]
-classifiers = [
-    "Development Status :: 5 - Production/Stable",
-    "Intended Audience :: Developers",
-    "Intended Audience :: Financial and Insurance Industry",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
-    "Topic :: Office/Business :: Financial :: Investment",
-    "Typing :: Typed",
-]
 dependencies = []
+
+# No keywords or trove classifiers: those fields exist to be read by a package
+# index, and this is source you clone. Everything below is what the build
+# backend and the test run actually need.
 
 [project.optional-dependencies]
 sqlite = ["aiosqlite>=0.20"]

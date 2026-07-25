@@ -12,21 +12,34 @@ code, the limit that applied, and the value that breached it.
 
 Zero runtime dependencies; Python 3.11+.
 
+## Getting it
+
+This is source you clone. It is not published to any package index, and the
+commands below are the only supported way in.
+
 ```bash
+git clone https://github.com/zayansalman/pretrade-risk-controls
+cd pretrade-risk-controls
+
 pip install -e .            # core: standard library only
 pip install -e ".[sqlite]"  # adds the SQLite-backed store (aiosqlite)
+pip install -e ".[dev]"     # adds pytest and ruff
 ```
 
 ```python
 from pretrade_risk import PreTradeRiskEngine, RiskLimits, OrderRequest
 ```
 
+The repository is `pretrade-risk-controls`; the import package is
+`pretrade_risk`, kept shorter because it appears at the head of every import
+line. Vendoring the `src/pretrade_risk` directory straight into your own tree
+works too — there is nothing to resolve.
+
 > **Venue-independent means venue-independent.** There is no venue client
 > here, no assumption about how prices are bounded, no instrument-type
 > arithmetic. The engine takes an order plus some context and returns a
 > decision. It was built against a prediction-market desk and applies
-> unchanged to equities, futures or FX. See [Naming](#naming) for why the
-> distribution and the import package differ.
+> unchanged to equities, futures or FX.
 
 ---
 
@@ -516,15 +529,14 @@ participant-facing component is the "PTRM Gateway", and Exegy sells "market
 access gateways". A repository called `pretrade-gate` reads, to someone in the
 field, like connectivity rather than risk logic.
 
-So the distribution is `pretrade-risk-controls` — the industry's own phrase
-for what this is, and the term someone would search for.
+So the repository is `pretrade-risk-controls` — the industry's own phrase for
+what this is, and the term someone would search for.
 
-**The import package stays shorter: `pretrade_risk`.** A distribution name and
-an import name are allowed to differ in Python and routinely do —
-`scikit-learn` imports as `sklearn`, `beautifulsoup4` as `bs4`,
-`python-dateutil` as `dateutil`. The full name earns its length on the tin,
-where it has to be unambiguous among every other package in the world; at a
-call site it would only restate what the import already makes obvious.
+**The import package stays shorter: `pretrade_risk`.** The repository name has
+to say what the thing is to somebody who has never seen it; an import line
+only has to be unambiguous inside a file that already imports it. Spending the
+full name at the head of every module would restate what the surrounding code
+makes obvious.
 
 Persisted state lives under `pretrade.*`.
 

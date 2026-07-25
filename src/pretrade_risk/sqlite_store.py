@@ -1,8 +1,7 @@
 """SQLite-backed :class:`~pretrade_risk.store.StateStore`.
 
-The only module in the package that imports ``aiosqlite`` — install it with
-the extra, ``pip install pretrade-risk[sqlite]``. The core package stays
-dependency-free.
+The only module in the package that imports ``aiosqlite``. Pull it in from a
+clone with ``pip install -e ".[sqlite]"``; the core stays dependency-free.
 
 ``set_many`` is a single transaction, which is what makes a counter snapshot
 atomic: after a crash the store holds either the whole previous snapshot or
