@@ -98,7 +98,7 @@ member.
 
 | # | Capability | Where it comes from | Here | Value | Notes |
 |---|---|---|---|---|---|
-| 24 | **Latching breach + explicit release** | **Eurex stop-button, HKEX block/unblock, CME kill switch** | ✘ | **highest** | Every surveyed system requires a deliberate human release. Here a halt is recomputed live, so any state change lifting PnL back over the floor silently re-arms trading. Persist a sticky `gate.halted` flag; only `reset_daily_loss_halt` clears it |
+| 24 | **Latching breach + explicit release** | **Eurex stop-button, HKEX block/unblock, CME kill switch** | ✘ | **highest** | Every surveyed system requires a deliberate human release. Here a halt is recomputed live, so any state change lifting PnL back over the floor silently re-arms trading. Persist a sticky `gate.halted` flag; only `reset_daily_loss_halt` clears it. **The primitive must admit two release forms**, or everything downstream grows its own latch: *operator-release* (the loss halt) and *latched-until-T* (a backoff deadline supplied by the venue, e.g. a `Retry-After`). One latch, two release policies — never two latches |
 | 25 | Kill = block **+ mass cancel** | **HKEX ("block plus mass order cancellation"), CME ("block all new order entry and cancel all working orders")** | ~ | **high** | The gate blocks new entries but never signals that the resting entry order should be pulled. `mark_kill_handled` is the right hook — extend it to demand a cancel acknowledgement |
 | 26 | Admin-only kill re-enable | CME (risk admin re-enables), HKEX | ✘ | medium-high | `rm KILL` silently re-arms the bot. Venues never allow that |
 | 27 | Liquidation-only / close-only mode | venue trading states, Eurex | ✘ | **high** | A halted gate should still permit *risk-reducing* orders. Today the gate is entry-only, so exits are simply un-gated — the same blind spot from the other direction |
@@ -116,6 +116,7 @@ member.
 | 34 | **Audit trail of limit changes and breaches** | 15c3-5, RTS 6 record-keeping, every venue GUI | ✘ | **high** | Biggest credibility gap: toggling the loss-halt bypass leaves no trace of who, when, or why. An append-only event stream (blocks, breaches, override writes, releases) costs little and makes the library defensible. Weightier since Nov 2025 than when this survey started — see the venue-status note below |
 | 35 | Alerting on approach and breach | Nasdaq alert thresholds, Eurex level-1 alert | ✘ | **high** | Optional `on_event` callback; `botdeck` and `feedwatch` are already the consumers |
 | 36 | Post-trade reconciliation vs limits | **RTS 6 Art. 16** | ✘ | **high** | The gate trusts the caller's `position_open` boolean absolutely. If it also derived its own view from `record_*` calls, a disagreement between the two would be a blockable condition — that catches EMS bugs no individual limit can |
+| 44 | Order lifecycle / partial fills | venue order-state models | ✘ | **high** | `position_open` and `entry_order_resting` are **booleans**, so a partially-filled entry satisfies the one-position rule, has its *full intended* clip counted by `record_buy_notional`, and leaves the gate's view of the position wrong with nothing to detect it. Prediction-market CLOB orders partial-fill routinely. This is the input-correctness precondition for #5, #9, #13, #36 and #40 alike — each of those needs to know what is actually working and what actually filled |
 | 37 | Injectable clock | venue session calendars | ✘ | **high** (as a seam) | `_roll_daily_window` hardcodes `datetime.now(UTC)`. UTC midnight is defensible for a 24/7 prediction market, so the *calendar* is not the point — the **seam** is: #4, #16, #17 and #40 all need a clock they can control, and injecting one also removes wall-clock dependence from the test suite |
 
 ---
@@ -141,11 +142,13 @@ production. New checks are **inserted**:
 | 6 | instrument tradeability, market state (#7, #38) | new |
 | 7 | one-position rule | existing |
 | 8 | positive notional | existing |
-| 9 | per-trade cap | existing |
-| 10 | bankroll cap | existing |
-| 11 | available collateral (#15) | new |
-| 12 | structural validity — tick, lot, min size (#39) | new |
-| 13 | price collar / slippage (#3) | existing, stays last |
+| 9 | self-match / would-cross-own-order (#9) | new |
+| 10 | per-trade cap | existing |
+| 11 | bankroll cap | existing |
+| 12 | concentration / group exposure | new — reserved |
+| 13 | available collateral (#15) | new |
+| 14 | structural validity — tick, lot, min size (#39) | new |
+| 15 | price collar / slippage (#3) | existing, stays last |
 
 The ordering principle: **system state before instrument state before position state before
 economics before microstructure.** A blocked bot should learn *why it is blocked* at the widest
