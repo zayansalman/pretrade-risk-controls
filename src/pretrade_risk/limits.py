@@ -27,8 +27,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from pretrade_gate.clock import MILLIS_PER_DAY
-from pretrade_gate.order import SessionState
+from pretrade_risk.clock import MILLIS_PER_DAY
+from pretrade_risk.order import SessionState
 
 
 @dataclass(frozen=True)

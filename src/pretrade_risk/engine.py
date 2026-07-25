@@ -20,7 +20,7 @@ The one deliberate exception is the kill switch, which stats its file on every
 evaluation. A control that only takes effect after a refresh has run is not a
 kill switch.
 
-The operator control plane in :mod:`pretrade_gate.controls` writes the same
+The operator control plane in :mod:`pretrade_risk.controls` writes the same
 store from a separate process and never touches a live engine object. The
 store is the only channel between them.
 
@@ -40,19 +40,19 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from pretrade_gate import keys
-from pretrade_gate.clock import Clock, SystemClock, trading_day
-from pretrade_gate.decision import ACCEPTED, RejectCode, RiskDecision
-from pretrade_gate.encoding import (
+from pretrade_risk import keys
+from pretrade_risk.clock import Clock, SystemClock, trading_day
+from pretrade_risk.decision import ACCEPTED, RejectCode, RiskDecision
+from pretrade_risk.encoding import (
     decode_bool,
     decode_float,
     decode_positive_float,
     encode_float,
 )
-from pretrade_gate.limits import RiskLimits
-from pretrade_gate.order import OrderRequest, Side
-from pretrade_gate.store import StateStore
-from pretrade_gate.windows import DuplicateWindow, RateWindow
+from pretrade_risk.limits import RiskLimits
+from pretrade_risk.order import OrderRequest, Side
+from pretrade_risk.store import StateStore
+from pretrade_risk.windows import DuplicateWindow, RateWindow
 
 
 @dataclass(frozen=True)
@@ -199,7 +199,7 @@ class PreTradeRiskEngine:
     async def persist(self) -> None:
         """Write the counter snapshot as one batch.
 
-        One :meth:`~pretrade_gate.store.StateStore.set_many` rather than a
+        One :meth:`~pretrade_risk.store.StateStore.set_many` rather than a
         sequence of single writes, so a store that can commit atomically does
         and a crash cannot leave the snapshot half-updated.
         """
@@ -461,7 +461,7 @@ class PreTradeRiskEngine:
         """Decide whether this order may be sent.
 
         Walks :data:`CONTROL_SEQUENCE` in order and returns the first
-        rejection, or :data:`~pretrade_gate.decision.ACCEPTED`. Synchronous
+        rejection, or :data:`~pretrade_risk.decision.ACCEPTED`. Synchronous
         and free of store I/O; the kill switch's file check is the one
         deliberate exception.
         """

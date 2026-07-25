@@ -4,14 +4,14 @@ Every order answers one question before it leaves the building:
 ``engine.evaluate(order)`` — an accepted decision means send it, a rejected one
 carries a stable code, the limit that applied, and the value that breached it.
 
-The SQLite-backed store lives in :mod:`pretrade_gate.sqlite_store` and is
+The SQLite-backed store lives in :mod:`pretrade_risk.sqlite_store` and is
 imported explicitly, so the package root stays importable without the optional
 ``aiosqlite`` extra.
 """
 
-from pretrade_gate import keys
-from pretrade_gate.clock import Clock, ManualClock, SystemClock, trading_day
-from pretrade_gate.controls import (
+from pretrade_risk import keys
+from pretrade_risk.clock import Clock, ManualClock, SystemClock, trading_day
+from pretrade_risk.controls import (
     MAX_BYPASS_DURATION_MILLIS,
     BypassRecord,
     bypass_loss_limit,
@@ -23,11 +23,11 @@ from pretrade_gate.controls import (
     set_runtime_max_order_notional,
     set_runtime_max_order_quantity,
 )
-from pretrade_gate.decision import ACCEPTED, RejectCode, RiskDecision
-from pretrade_gate.engine import CONTROL_SEQUENCE, Control, PreTradeRiskEngine
-from pretrade_gate.limits import RiskLimits
-from pretrade_gate.order import OrderRequest, SessionState, Side
-from pretrade_gate.store import InMemoryStateStore, SequentialBatchMixin, StateStore
+from pretrade_risk.decision import ACCEPTED, RejectCode, RiskDecision
+from pretrade_risk.engine import CONTROL_SEQUENCE, Control, PreTradeRiskEngine
+from pretrade_risk.limits import RiskLimits
+from pretrade_risk.order import OrderRequest, SessionState, Side
+from pretrade_risk.store import InMemoryStateStore, SequentialBatchMixin, StateStore
 
 __all__ = [
     "ACCEPTED",

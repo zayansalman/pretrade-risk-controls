@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from pretrade_gate import (
+from pretrade_risk import (
     CONTROL_SEQUENCE,
     InMemoryStateStore,
     ManualClock,
@@ -83,7 +83,7 @@ class TestControlSequence:
         # it. Every member of the enum must be emitted by some control.
         import inspect
 
-        from pretrade_gate import engine as engine_module
+        from pretrade_risk import engine as engine_module
 
         source = inspect.getsource(engine_module)
         for code in RejectCode:
@@ -807,8 +807,8 @@ class TestPersistenceAcrossRestart:
 
     @pytest.mark.asyncio
     async def test_a_missing_peak_degrades_to_the_fixed_floor(self, store) -> None:
-        from pretrade_gate import keys
-        from pretrade_gate.encoding import encode_float
+        from pretrade_risk import keys
+        from pretrade_risk.encoding import encode_float
 
         eng = engine(RiskLimits(daily_loss_limit_usd=10.0), store)
         await store.set_many(
@@ -822,7 +822,7 @@ class TestPersistenceAcrossRestart:
 
     @pytest.mark.asyncio
     async def test_a_corrupt_counter_degrades_to_zero(self, store) -> None:
-        from pretrade_gate import keys
+        from pretrade_risk import keys
 
         eng = engine(RiskLimits(daily_loss_limit_usd=10.0), store)
         await store.set_many(
@@ -835,8 +835,8 @@ class TestPersistenceAcrossRestart:
     async def test_a_stored_peak_below_pnl_is_not_trusted(self, store) -> None:
         # A peak that is lower than realized P&L is impossible; adopting it
         # would drop the floor and loosen the limit.
-        from pretrade_gate import keys
-        from pretrade_gate.encoding import encode_float
+        from pretrade_risk import keys
+        from pretrade_risk.encoding import encode_float
 
         eng = engine(RiskLimits(daily_loss_limit_usd=10.0), store)
         await store.set_many(

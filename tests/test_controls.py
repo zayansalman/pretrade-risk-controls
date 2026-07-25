@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from pretrade_gate import (
+from pretrade_risk import (
     MAX_BYPASS_DURATION_MILLIS,
     InMemoryStateStore,
     OrderRequest,

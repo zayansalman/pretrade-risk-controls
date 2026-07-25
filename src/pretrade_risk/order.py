@@ -14,7 +14,7 @@ no control at all.
 Fields default to "not supplied". A control whose input is missing is not
 silently skipped — if its limit is configured, the engine rejects the order
 rather than waving it through unchecked. See
-:class:`~pretrade_gate.limits.RiskLimits`.
+:class:`~pretrade_risk.limits.RiskLimits`.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
-from pretrade_gate.encoding import encode_float
+from pretrade_risk.encoding import encode_float
 
 
 class Side(str, Enum):

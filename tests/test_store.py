@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from pretrade_gate import (
+from pretrade_risk import (
     InMemoryStateStore,
     ManualClock,
     PreTradeRiskEngine,
@@ -17,7 +17,7 @@ from pretrade_gate import (
     keys,
     set_runtime_max_order_notional,
 )
-from pretrade_gate.sqlite_store import SqliteStateStore
+from pretrade_risk.sqlite_store import SqliteStateStore
 
 from conftest import FIXED_NOW_MILLIS
 

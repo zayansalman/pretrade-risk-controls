@@ -16,7 +16,7 @@ Wall-clock time is deliberate here, not a lapse. The trading day and override
 expiries are civil-time concepts that must survive a process restart, and a
 monotonic clock resets on reboot. The cost is that a backwards step in wall
 clock (an NTP correction) can briefly widen a rate-limit window; the
-:mod:`~pretrade_gate.windows` counters are written to tolerate that rather
+:mod:`~pretrade_risk.windows` counters are written to tolerate that rather
 than to assume it cannot happen.
 
 Trading day

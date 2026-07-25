@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from pretrade_gate.windows import DuplicateWindow, RateWindow
+from pretrade_risk.windows import DuplicateWindow, RateWindow
 
 
 class TestRateWindow:

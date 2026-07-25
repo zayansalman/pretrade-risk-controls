@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from pretrade_gate import InMemoryStateStore, ManualClock
+from pretrade_risk import InMemoryStateStore, ManualClock
 
 #: A fixed instant well inside a trading day, so a test advancing the clock by
 #: seconds cannot accidentally roll the day underneath itself.

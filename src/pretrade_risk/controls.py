@@ -1,9 +1,9 @@
 """Operator control plane — the write side of the risk engine.
 
-Free functions over a :class:`~pretrade_gate.store.StateStore`, deliberately
+Free functions over a :class:`~pretrade_risk.store.StateStore`, deliberately
 NOT methods on the engine. A risk console or command-line tool holds only a
 store handle and writes these keys; the trading process picks the change up at
-its next :meth:`~pretrade_gate.engine.PreTradeRiskEngine.refresh_overrides`.
+its next :meth:`~pretrade_risk.engine.PreTradeRiskEngine.refresh_overrides`.
 The two sides never share an object, so the control plane cannot reach into a
 running engine's memory, and the store is the only channel between them.
 
@@ -30,16 +30,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from pretrade_gate import keys
-from pretrade_gate.clock import Clock, SystemClock
-from pretrade_gate.encoding import (
+from pretrade_risk import keys
+from pretrade_risk.clock import Clock, SystemClock
+from pretrade_risk.encoding import (
     decode_bool,
     decode_float,
     decode_positive_float,
     encode_bool,
     encode_float,
 )
-from pretrade_gate.store import StateStore
+from pretrade_risk.store import StateStore
 
 #: Longest bypass this module will write. Not a regulatory figure — a
 #: deliberately awkward one. A suspension that needs to outlast a trading day

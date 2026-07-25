@@ -11,7 +11,7 @@ from datetime import datetime
 
 import pytest
 
-from pretrade_gate.clock import (
+from pretrade_risk.clock import (
     MILLIS_PER_DAY,
     MILLIS_PER_HOUR,
     ManualClock,

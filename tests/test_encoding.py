@@ -12,7 +12,7 @@ import math
 
 import pytest
 
-from pretrade_gate.encoding import (
+from pretrade_risk.encoding import (
     decode_bool,
     decode_float,
     decode_positive_float,

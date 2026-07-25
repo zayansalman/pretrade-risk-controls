@@ -38,7 +38,7 @@ class StateStore(Protocol):
     ``get`` returns ``None`` for a missing key. ``set`` takes a ``str``, never
     ``None`` — "cleared" is encoded as the empty string, and the contract is
     that ``""`` round-trips as ``""``, not ``None``. Readers that treat blank
-    as unset do so explicitly, in :mod:`pretrade_gate.encoding`.
+    as unset do so explicitly, in :mod:`pretrade_risk.encoding`.
     """
 
     async def get(self, key: str) -> str | None: ...

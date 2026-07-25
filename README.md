@@ -1,4 +1,4 @@
-# pretrade-gate
+# pretrade-risk
 
 A venue-independent **pre-trade risk control layer**. Every order answers one
 question before it leaves the building:
@@ -171,7 +171,7 @@ not gaps in the standards.
 ```python
 import asyncio
 
-from pretrade_gate import (
+from pretrade_risk import (
     InMemoryStateStore,
     OrderRequest,
     PreTradeRiskEngine,
@@ -237,7 +237,7 @@ Run the narrated walkthrough of a full session: `python examples/demo.py`.
 
 ```mermaid
 flowchart LR
-    S[Strategies] --> R[pretrade-gate<br/>pre-trade risk controls]
+    S[Strategies] --> R[pretrade-risk<br/>pre-trade risk controls]
     D[Market data] --> E
     R --> E[Execution / order routing]
     E --> V[(Trading venue)]
@@ -251,7 +251,7 @@ flowchart LR
 ```
 
 Standalone components extracted from the same trading system:
-[pretrade-gate](https://github.com/zayansalman/pretrade-gate) — this repository,
+`pretrade-risk` — this repository,
 [ledger-recon](https://github.com/zayansalman/ledger-recon) (post-trade
 reconciliation),
 [feedwatch](https://github.com/zayansalman/feedwatch) (feed health and
@@ -385,7 +385,7 @@ Free functions over a bare store handle, callable from a process that holds no
 engine at all:
 
 ```python
-from pretrade_gate import (
+from pretrade_risk import (
     bypass_loss_limit,
     clear_loss_limit_bypass,
     read_loss_limit_bypass,
@@ -491,11 +491,15 @@ Read these before trusting it with money.
 
 The industry term for this component is *pre-trade risk controls*, and
 exchanges and vendors ship it under the name *Pre-Trade Risk Management*
-(PTRM). "Pre-trade" here is exactly the standard term; "gate" is the
-colloquial half — a desk would more likely say controls, checks or gateway.
-The repository name is kept for continuity with the components it was
-extracted alongside, and the documentation uses the standard vocabulary
-throughout.
+(PTRM) — Nasdaq, HKEX and Borsa İstanbul all title their systems exactly that,
+and MiFID II RTS 6 calls the checks themselves "pre-trade controls".
+
+This project was previously called `pretrade-gate`. "Pre-trade" was already
+the standard term, but "gate" was the colloquial half: a desk says controls,
+checks or gateway, and in real documentation "gateway" names the interface a
+participant connects to rather than the check it performs. The name is now
+`pretrade-risk`, the import package is `pretrade_risk`, and persisted state
+lives under `pretrade.*`.
 
 ---
 
@@ -510,7 +514,7 @@ on by an old simulation run would have silently disarmed the real-money limit.
 That is why bypasses here cannot be written without an expiry.
 
 The extraction replaced a hard-wired configuration table with the injected
-store, and the rework since then generalised a single-instrument, one-position
-gate into the control set above.
+store, and the rework since then generalised a single-instrument,
+one-position-at-a-time check into the control set above.
 
 MIT licensed.

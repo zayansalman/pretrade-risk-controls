@@ -78,7 +78,7 @@ class DuplicateWindow:
     does not see its own acknowledgement and resubmits the identical order,
     and the operator who double-clicks. The caller decides what makes two
     orders "the same" by choosing the fingerprint — see
-    :meth:`~pretrade_gate.order.OrderRequest.fingerprint`.
+    :meth:`~pretrade_risk.order.OrderRequest.fingerprint`.
     """
 
     def __init__(self, window_millis: int) -> None:

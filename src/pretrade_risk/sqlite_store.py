@@ -1,7 +1,7 @@
-"""SQLite-backed :class:`~pretrade_gate.store.StateStore`.
+"""SQLite-backed :class:`~pretrade_risk.store.StateStore`.
 
 The only module in the package that imports ``aiosqlite`` — install it with
-the extra, ``pip install pretrade-gate[sqlite]``. The core package stays
+the extra, ``pip install pretrade-risk[sqlite]``. The core package stays
 dependency-free.
 
 ``set_many`` is a single transaction, which is what makes a counter snapshot

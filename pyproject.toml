@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "pretrade-gate"
+name = "pretrade-risk"
 version = "2.0.0"
 description = "Venue-independent pre-trade risk controls: order validation, price bands, message throttles, position and exposure limits, and a trailing daily loss limit. Zero runtime dependencies."
 readme = "README.md"
@@ -39,14 +39,14 @@ sqlite = ["aiosqlite>=0.20"]
 dev = ["pytest", "pytest-asyncio", "ruff>=0.16,<0.17", "aiosqlite>=0.20"]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/pretrade_gate"]
+packages = ["src/pretrade_risk"]
 
 [tool.ruff]
 line-length = 100
 target-version = "py311"
 
 [tool.ruff.lint.isort]
-known-first-party = ["pretrade_gate"]
+known-first-party = ["pretrade_risk"]
 # The test suite imports shared constants from its own conftest. That is a
 # local-folder import, not a third-party one, and saying so keeps it sorted
 # last instead of being grouped in with pytest.

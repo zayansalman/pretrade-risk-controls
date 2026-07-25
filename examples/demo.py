@@ -2,7 +2,7 @@
 
 Every verdict printed below is the engine's own decision — the same reject
 code and message a supervisor would find in the order log. Runs on the
-standard library plus pretrade_gate, in well under a second:
+standard library plus pretrade_risk, in well under a second:
 
     python examples/demo.py
 """
@@ -13,7 +13,7 @@ import asyncio
 import tempfile
 from pathlib import Path
 
-from pretrade_gate import (
+from pretrade_risk import (
     InMemoryStateStore,
     ManualClock,
     OrderRequest,
