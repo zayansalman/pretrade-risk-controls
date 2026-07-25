@@ -17,6 +17,7 @@ when its input stops arriving.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 
@@ -236,6 +237,56 @@ class TestEnablingAndDisablingControls:
         assert engine(limits.disable(ControlId.KILL_SWITCH)).evaluate(order()).accepted
 
 
+class TestReportingMatchesReality:
+    """What the engine SAYS it runs must be what it actually runs.
+
+    This is the property that makes the reporting methods worth trusting: an
+    operator console reading ``control_status()`` has to be looking at the same
+    answer ``evaluate`` acts on, under every combination of configured limits
+    and disabled controls — not just the ones somebody thought to test.
+    """
+
+    LIMIT_OPTIONS: ClassVar[dict[str, object]] = {
+        "daily_loss_limit_usd": 500.0,
+        "max_order_quantity": 10.0,
+        "max_order_notional_usd": 1e6,
+        "price_band_fraction": 0.03,
+        "max_orders_per_window": 5,
+        "max_position_quantity": 100.0,
+        "prevent_self_match": True,
+        "max_quote_age_millis": 1_000,
+    }
+
+    def test_the_three_views_never_disagree(self) -> None:
+        import random
+
+        random.seed(20260725)
+        keys = list(self.LIMIT_OPTIONS)
+        switchable = sorted(set(ControlId) - ALWAYS_ON, key=lambda c: c.value)
+
+        for _ in range(200):
+            chosen = {
+                k: self.LIMIT_OPTIONS[k] for k in random.sample(keys, random.randint(0, len(keys)))
+            }
+            disabled = frozenset(random.sample(switchable, random.randint(0, 5)))
+            eng = engine(RiskLimits(**chosen, disabled_controls=disabled))
+
+            reported = set(eng.running_controls())
+            from_status = {s.id for s in eng.control_status() if s.running}
+            actually_evaluated = {c.id for c in CONTROL_SEQUENCE if eng._runs(c)}
+
+            assert reported == from_status == actually_evaluated, (
+                f"views disagree for limits={sorted(chosen)} disabled={sorted(disabled)}"
+            )
+
+    def test_a_disabled_control_is_never_evaluated(self) -> None:
+        # The end-to-end version: every switchable control, disabled one at a
+        # time, must be absent from what the engine runs.
+        for control in sorted(set(ControlId) - ALWAYS_ON, key=lambda c: c.value):
+            limits = RiskLimits(**self.LIMIT_OPTIONS).disable(control)
+            assert control not in engine(limits).running_controls()
+
+
 class TestControlStatus:
     def test_reports_every_control_in_evaluation_order(self) -> None:
         status = engine(RiskLimits()).control_status()
@@ -269,7 +320,7 @@ class TestControlStatus:
         limits = RiskLimits(price_band_fraction=0.03).disable(
             ControlId.PRICE_BAND, ControlId.GROSS_EXPOSURE
         )
-        assert engine(limits).disabled_controls() == (ControlId.PRICE_BAND,)
+        assert engine(limits).stood_down_controls() == (ControlId.PRICE_BAND,)
 
 
 class TestKillSwitch:

@@ -498,12 +498,19 @@ class PreTradeRiskEngine:
         """The controls that will actually evaluate an order, in order."""
         return tuple(control.id for control in CONTROL_SEQUENCE if self._runs(control))
 
-    def disabled_controls(self) -> tuple[ControlId, ...]:
+    def stood_down_controls(self) -> tuple[ControlId, ...]:
         """Controls switched off despite being configured.
 
         Kept distinct from "never configured" because this is the list a
         supervisor asks about — a control that was calibrated and then stood
         down is a decision somebody made.
+
+        Deliberately NOT named after
+        :attr:`~pretrade_risk.limits.RiskLimits.disabled_controls`, which it
+        would otherwise shadow while meaning something narrower: that field is
+        what somebody asked to switch off, this is what switching it off
+        actually suppressed. Naming a request and its effect the same thing
+        invites reading one as the other.
         """
         return tuple(
             control.id

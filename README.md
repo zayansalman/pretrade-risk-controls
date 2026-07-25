@@ -84,7 +84,7 @@ Ask the engine what is actually live rather than reading the configuration:
 >>> engine.running_controls()          # what will evaluate the next order
 (<ControlId.DAILY_LOSS_LIMIT: ...>, <ControlId.ORDER_QUANTITY: ...>, ...)
 
->>> engine.disabled_controls()         # configured, then deliberately stood down
+>>> engine.stood_down_controls()         # configured, then deliberately stood down
 (<ControlId.PRICE_BAND: ...>,)
 
 >>> for status in engine.control_status():
