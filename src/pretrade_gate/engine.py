@@ -68,8 +68,8 @@ class Control:
     """
 
     name: str
-    is_armed: Callable[["PreTradeRiskEngine"], bool]
-    check: Callable[["PreTradeRiskEngine", OrderRequest, int], RiskDecision | None]
+    is_armed: Callable[[PreTradeRiskEngine], bool]
+    check: Callable[[PreTradeRiskEngine, OrderRequest, int], RiskDecision | None]
 
 
 class PreTradeRiskEngine:

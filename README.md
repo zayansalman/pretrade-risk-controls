@@ -172,28 +172,32 @@ not gaps in the standards.
 import asyncio
 
 from pretrade_gate import (
-    InMemoryStateStore, OrderRequest, PreTradeRiskEngine,
-    RiskLimits, SessionState, Side,
+    InMemoryStateStore,
+    OrderRequest,
+    PreTradeRiskEngine,
+    RiskLimits,
+    SessionState,
+    Side,
 )
 
 
 async def main():
     limits = RiskLimits(
-        daily_loss_limit_usd=500.0,        # trailing drawdown from the session peak
+        daily_loss_limit_usd=500.0,  # trailing drawdown from the session peak
         daily_notional_limit_usd=50_000.0,  # cumulative notional for the day
         max_order_quantity=1_000.0,
         max_order_notional_usd=10_000.0,
-        price_band_fraction=0.03,           # 3% either side of the reference
-        max_execution_slippage=0.05,        # adverse drift from the decision price
+        price_band_fraction=0.03,  # 3% either side of the reference
+        max_execution_slippage=0.05,  # adverse drift from the decision price
         max_quote_age_millis=1_000,
         duplicate_window_millis=5_000,
         max_orders_per_window=20,
         max_position_quantity=2_000.0,
         tradeable_session_states=frozenset({SessionState.OPEN}),
-        kill_switch_path=None,              # a Path blocks everything while it exists
+        kill_switch_path=None,  # a Path blocks everything while it exists
     )
     engine = PreTradeRiskEngine(limits, InMemoryStateStore(), is_live=True)
-    await engine.load()          # rebuild today's counters
+    await engine.load()  # rebuild today's counters
     await engine.refresh_overrides()
 
     order = OrderRequest(
@@ -211,14 +215,14 @@ async def main():
     decision = engine.evaluate(order)
     if decision:
         # ... send the order, then tell the engine what you did
-        engine.record_order_sent(order)      # feeds the rate and duplicate windows
-        notional = order.notional_usd()      # None only if the order cannot be priced
+        engine.record_order_sent(order)  # feeds the rate and duplicate windows
+        notional = order.notional_usd()  # None only if the order cannot be priced
         if notional is not None:
             await engine.record_notional(notional)
     else:
         print(decision.code.value, decision.message)
 
-    await engine.record_execution()                       # a fill
+    await engine.record_execution()  # a fill
     await engine.record_realized_pnl(-125.0, is_live=True)  # a close
 
 
@@ -382,8 +386,11 @@ engine at all:
 
 ```python
 from pretrade_gate import (
-    bypass_loss_limit, clear_loss_limit_bypass, read_loss_limit_bypass,
-    reset_daily_loss_limit, set_runtime_max_order_notional,
+    bypass_loss_limit,
+    clear_loss_limit_bypass,
+    read_loss_limit_bypass,
+    reset_daily_loss_limit,
+    set_runtime_max_order_notional,
 )
 
 # Suspend the loss limit — bounded, attributed, and self-reversing.
@@ -394,11 +401,11 @@ await bypass_loss_limit(
     reason="unwinding an illiquid position after the halt",
 )
 
-record = await read_loss_limit_bypass(store)   # who, why, when, until
+record = await read_loss_limit_bypass(store)  # who, why, when, until
 
-await set_runtime_max_order_notional(store, 2_500.0)   # resize without a restart
+await set_runtime_max_order_notional(store, 2_500.0)  # resize without a restart
 await clear_loss_limit_bypass(store, actor="risk.manager")
-await reset_daily_loss_limit(store)             # stopped engines only — see the docstring
+await reset_daily_loss_limit(store)  # stopped engines only — see the docstring
 ```
 
 Every change takes effect on the engine's next `refresh_overrides()`.

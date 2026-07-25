@@ -64,7 +64,7 @@ class SqliteStateStore:
         placeholders = ",".join("?" * len(wanted))
         async with aiosqlite.connect(self._path) as db:
             await self._prepare(db)
-            query = f"SELECT key, value FROM state WHERE key IN ({placeholders})"  # noqa: S608
+            query = f"SELECT key, value FROM state WHERE key IN ({placeholders})"
             async with db.execute(query, wanted) as cur:
                 async for key, value in cur:
                     found[key] = value
