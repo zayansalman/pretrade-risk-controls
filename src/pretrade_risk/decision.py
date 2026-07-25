@@ -1,4 +1,10 @@
-"""What the engine returns: a stable reject code plus the numbers behind it.
+"""The library's stable identifiers, and what the engine returns.
+
+Two enumerations here are public interface and may not change without a major
+version: :class:`ControlId`, which names each control, and :class:`RejectCode`,
+which names each way an order can be refused. Everything else in the library —
+message wording, field ordering, internal structure — is free to change.
+
 
 A free-text reason is enough for a human reading a log and useless for
 everything else. Downstream systems have to route on the outcome — a stale
@@ -33,6 +39,66 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+
+
+class ControlId(str, Enum):
+    """Stable identifier for each control, in evaluation order.
+
+    Separate from the human name a rejection message carries, and for the same
+    reason reject codes are separate from their messages: the wording is for
+    people, the identifier is for configuration and code. Switching a control
+    off is done with one of these rather than a bare string, so a typo is a
+    startup error instead of a control that silently never runs.
+    """
+
+    # -- System state ---------------------------------------------------
+    KILL_SWITCH = "KILL_SWITCH"
+
+    # -- Capital preservation -------------------------------------------
+    DAILY_LOSS_LIMIT = "DAILY_LOSS_LIMIT"
+
+    # -- Eligibility and compliance --------------------------------------
+    INSTRUMENT_UNIVERSE = "INSTRUMENT_UNIVERSE"
+    RESTRICTED_LIST = "RESTRICTED_LIST"
+    SESSION_STATE = "SESSION_STATE"
+    SHORT_SALE_LOCATE = "SHORT_SALE_LOCATE"
+
+    # -- Order well-formedness (never disableable) ------------------------
+    ORDER_QUANTITY = "ORDER_QUANTITY"
+    ORDER_PRICE = "ORDER_PRICE"
+    ORDER_NOTIONAL = "ORDER_NOTIONAL"
+
+    # -- Order size caps --------------------------------------------------
+    MAX_ORDER_QUANTITY = "MAX_ORDER_QUANTITY"
+    MAX_ORDER_NOTIONAL = "MAX_ORDER_NOTIONAL"
+
+    # -- Price reasonableness ---------------------------------------------
+    QUOTE_AGE = "QUOTE_AGE"
+    PRICE_BAND = "PRICE_BAND"
+    EXECUTION_SLIPPAGE = "EXECUTION_SLIPPAGE"
+
+    # -- Message conduct ---------------------------------------------------
+    DUPLICATE_ORDER = "DUPLICATE_ORDER"
+    ORDER_RATE = "ORDER_RATE"
+    CONSECUTIVE_REJECTS = "CONSECUTIVE_REJECTS"
+    REPEATED_EXECUTION = "REPEATED_EXECUTION"
+
+    # -- Position and exposure ----------------------------------------------
+    WORKING_ORDERS = "WORKING_ORDERS"
+    OPEN_POSITIONS = "OPEN_POSITIONS"
+    POSITION_LIMIT = "POSITION_LIMIT"
+    SELF_MATCH_PREVENTION = "SELF_MATCH_PREVENTION"
+    GROSS_EXPOSURE = "GROSS_EXPOSURE"
+    DAILY_NOTIONAL_LIMIT = "DAILY_NOTIONAL_LIMIT"
+
+
+#: Controls that decide whether an order is well formed at all. A negative
+#: quantity or a zero limit price is malformed whatever a desk's risk appetite
+#: is, so these cannot be switched off — there is no configuration under which
+#: sending one is the intended behaviour.
+ALWAYS_ON: frozenset[ControlId] = frozenset(
+    {ControlId.ORDER_QUANTITY, ControlId.ORDER_PRICE, ControlId.ORDER_NOTIONAL}
+)
 
 
 class RejectCode(str, Enum):

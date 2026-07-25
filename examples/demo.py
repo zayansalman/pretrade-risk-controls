@@ -107,9 +107,15 @@ async def main() -> None:
         engine = PreTradeRiskEngine(limits, store, is_live=True, clock=clock)
         await engine.load()
 
-        print(f"ARMED CONTROLS ({len(engine.armed_controls())})")
-        for name in engine.armed_controls():
-            print(f"  - {name}")
+        running = engine.running_controls()
+        print(f"RUNNING CONTROLS ({len(running)} of {len(engine.control_status())})")
+        for status in engine.control_status():
+            if status.running:
+                print(f"  - {status.name}")
+        print("  not configured, so not running:")
+        for status in engine.control_status():
+            if not status.configured:
+                print(f"      {status.name}")
 
         print("\n1. A NORMAL ORDER")
         show(engine, "buy 100 ACME at 10.00, book steady", build_order())

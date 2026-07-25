@@ -42,7 +42,7 @@ from dataclasses import dataclass
 
 from pretrade_risk import keys
 from pretrade_risk.clock import Clock, SystemClock, trading_day
-from pretrade_risk.decision import ACCEPTED, RejectCode, RiskDecision
+from pretrade_risk.decision import ACCEPTED, ControlId, RejectCode, RiskDecision
 from pretrade_risk.encoding import (
     decode_bool,
     decode_float,
@@ -57,7 +57,7 @@ from pretrade_risk.windows import DuplicateWindow, RateWindow
 
 @dataclass(frozen=True)
 class Control:
-    """One pre-trade control: a name, an arming test, and the check itself.
+    """One pre-trade control: an identifier, a name, an arming test, and the check.
 
     Arming is kept separate from evaluation so that "which controls are live
     right now" can be answered without running any of them — some controls
@@ -67,9 +67,36 @@ class Control:
     ``check`` returns ``None`` when the control is satisfied.
     """
 
+    id: ControlId
     name: str
     is_armed: Callable[[PreTradeRiskEngine], bool]
     check: Callable[[PreTradeRiskEngine, OrderRequest, int], RiskDecision | None]
+
+
+@dataclass(frozen=True)
+class ControlStatus:
+    """Whether one control will run, and if not, why not.
+
+    ``running`` is the only field a caller has to read. The two below it
+    separate the reasons, because "nobody set a limit" and "somebody switched
+    it off" are different situations with different owners.
+    """
+
+    id: ControlId
+    name: str
+    configured: bool
+    disabled: bool
+
+    @property
+    def running(self) -> bool:
+        return self.configured and not self.disabled
+
+    def __str__(self) -> str:
+        if self.running:
+            return f"{self.name}: running"
+        if self.disabled:
+            return f"{self.name}: DISABLED"
+        return f"{self.name}: no limit configured"
 
 
 class PreTradeRiskEngine:
@@ -442,16 +469,47 @@ class PreTradeRiskEngine:
             return False
         return self.limits.kill_switch_path.exists()
 
-    def armed_controls(self) -> tuple[str, ...]:
-        """The controls this engine currently arms, in evaluation order.
+    def _runs(self, control: Control) -> bool:
+        """Whether this control will be evaluated: configured and not disabled."""
+        return not self.limits.is_disabled(control.id) and control.is_armed(self)
 
-        A limit set is a long structure of mostly-``None`` fields, and "which
-        controls are actually live right now" is the first question an
-        operator asks. Answering it from the engine rather than by reading the
-        configuration closes the gap between what a desk believes is armed and
-        what is.
+    def control_status(self) -> tuple[ControlStatus, ...]:
+        """Every control, in evaluation order, and whether it will run.
+
+        A limit set is a long structure of mostly-``None`` fields, and "what is
+        actually protecting me right now" is the first question an operator
+        asks. Answering it from the engine rather than by reading the
+        configuration closes the gap between what a desk believes is on and
+        what is — and it separates the two reasons a control might be silent,
+        which have different owners: nobody set a limit, or somebody switched
+        it off.
         """
-        return tuple(control.name for control in CONTROL_SEQUENCE if control.is_armed(self))
+        return tuple(
+            ControlStatus(
+                id=control.id,
+                name=control.name,
+                configured=control.is_armed(self),
+                disabled=self.limits.is_disabled(control.id),
+            )
+            for control in CONTROL_SEQUENCE
+        )
+
+    def running_controls(self) -> tuple[ControlId, ...]:
+        """The controls that will actually evaluate an order, in order."""
+        return tuple(control.id for control in CONTROL_SEQUENCE if self._runs(control))
+
+    def disabled_controls(self) -> tuple[ControlId, ...]:
+        """Controls switched off despite being configured.
+
+        Kept distinct from "never configured" because this is the list a
+        supervisor asks about — a control that was calibrated and then stood
+        down is a decision somebody made.
+        """
+        return tuple(
+            control.id
+            for control in CONTROL_SEQUENCE
+            if self.limits.is_disabled(control.id) and control.is_armed(self)
+        )
 
     # ------------------------------------------------------------------
     # The decision
@@ -468,7 +526,7 @@ class PreTradeRiskEngine:
         now = self._clock.now_millis()
         self._roll_trading_day(now)
         for control in CONTROL_SEQUENCE:
-            if not control.is_armed(self):
+            if not self._runs(control):
                 continue
             decision = control.check(self, request, now)
             if decision is not None:
@@ -861,111 +919,144 @@ def _always_armed(engine: PreTradeRiskEngine) -> bool:
 #: Cheapest and most absolute first; most contextual last.
 CONTROL_SEQUENCE: tuple[Control, ...] = (
     Control(
+        ControlId.KILL_SWITCH,
         "kill switch",
         lambda e: e.limits.kill_switch_path is not None,
         PreTradeRiskEngine._check_kill_switch,
     ),
     Control(
+        ControlId.DAILY_LOSS_LIMIT,
         "daily loss limit",
         lambda e: e.limits.daily_loss_limit_usd is not None,
         PreTradeRiskEngine._check_loss_limit,
     ),
     Control(
+        ControlId.INSTRUMENT_UNIVERSE,
         "instrument universe",
         lambda e: e.limits.permitted_instruments is not None,
         PreTradeRiskEngine._check_instrument_permitted,
     ),
     Control(
+        ControlId.RESTRICTED_LIST,
         "restricted list",
         lambda e: bool(e.limits.restricted_instruments),
         PreTradeRiskEngine._check_instrument_restricted,
     ),
     Control(
+        ControlId.SESSION_STATE,
         "session state",
         lambda e: e.limits.tradeable_session_states is not None,
         PreTradeRiskEngine._check_session_state,
     ),
     Control(
+        ControlId.SHORT_SALE_LOCATE,
         "short sale locate",
         lambda e: e.limits.require_short_sale_locate,
         PreTradeRiskEngine._check_short_sale_locate,
     ),
     # Well-formedness is always armed: an order with a non-positive quantity,
     # price or notional is malformed regardless of which limits a desk sets.
-    Control("order quantity", _always_armed, PreTradeRiskEngine._check_quantity_sign),
-    Control("order price", _always_armed, PreTradeRiskEngine._check_price_sign),
-    Control("order notional", _always_armed, PreTradeRiskEngine._check_notional_sign),
     Control(
+        ControlId.ORDER_QUANTITY,
+        "order quantity",
+        _always_armed,
+        PreTradeRiskEngine._check_quantity_sign,
+    ),
+    Control(
+        ControlId.ORDER_PRICE, "order price", _always_armed, PreTradeRiskEngine._check_price_sign
+    ),
+    Control(
+        ControlId.ORDER_NOTIONAL,
+        "order notional",
+        _always_armed,
+        PreTradeRiskEngine._check_notional_sign,
+    ),
+    Control(
+        ControlId.MAX_ORDER_QUANTITY,
         "maximum order quantity",
         lambda e: e.effective_max_order_quantity is not None,
         PreTradeRiskEngine._check_max_quantity,
     ),
     Control(
+        ControlId.MAX_ORDER_NOTIONAL,
         "maximum order notional",
         lambda e: e.effective_max_order_notional is not None,
         PreTradeRiskEngine._check_max_notional,
     ),
     Control(
+        ControlId.QUOTE_AGE,
         "quote age",
         lambda e: e.limits.max_quote_age_millis is not None,
         PreTradeRiskEngine._check_quote_age,
     ),
     Control(
+        ControlId.PRICE_BAND,
         "price band",
         lambda e: e.limits.price_band_fraction is not None,
         PreTradeRiskEngine._check_price_band,
     ),
     Control(
+        ControlId.EXECUTION_SLIPPAGE,
         "execution slippage",
         lambda e: e.limits.max_execution_slippage is not None,
         PreTradeRiskEngine._check_execution_slippage,
     ),
     Control(
+        ControlId.DUPLICATE_ORDER,
         "duplicate order",
         lambda e: e._duplicate_window is not None,
         PreTradeRiskEngine._check_duplicate,
     ),
     Control(
+        ControlId.ORDER_RATE,
         "order rate",
         lambda e: e.limits.max_orders_per_window is not None,
         PreTradeRiskEngine._check_order_rate,
     ),
     Control(
+        ControlId.CONSECUTIVE_REJECTS,
         "consecutive rejections",
         lambda e: e.limits.max_consecutive_rejects is not None,
         PreTradeRiskEngine._check_consecutive_rejects,
     ),
     Control(
+        ControlId.REPEATED_EXECUTION,
         "repeated execution throttle",
         lambda e: e.limits.max_executions_without_review is not None,
         PreTradeRiskEngine._check_repeated_execution,
     ),
     Control(
+        ControlId.WORKING_ORDERS,
         "working orders",
         lambda e: e.limits.max_working_orders is not None,
         PreTradeRiskEngine._check_working_orders,
     ),
     Control(
+        ControlId.OPEN_POSITIONS,
         "open positions",
         lambda e: e.limits.max_open_positions is not None,
         PreTradeRiskEngine._check_open_positions,
     ),
     Control(
+        ControlId.POSITION_LIMIT,
         "position limit",
         lambda e: e.limits.max_position_quantity is not None,
         PreTradeRiskEngine._check_position_limit,
     ),
     Control(
+        ControlId.SELF_MATCH_PREVENTION,
         "self-match prevention",
         lambda e: e.limits.prevent_self_match,
         PreTradeRiskEngine._check_self_match,
     ),
     Control(
+        ControlId.GROSS_EXPOSURE,
         "gross exposure",
         lambda e: e.limits.max_gross_exposure_usd is not None,
         PreTradeRiskEngine._check_gross_exposure,
     ),
     Control(
+        ControlId.DAILY_NOTIONAL_LIMIT,
         "daily notional limit",
         lambda e: e.limits.daily_notional_limit_usd is not None,
         PreTradeRiskEngine._check_daily_notional,

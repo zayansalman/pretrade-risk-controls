@@ -21,7 +21,9 @@ from pathlib import Path
 import pytest
 
 from pretrade_risk import (
+    ALWAYS_ON,
     CONTROL_SEQUENCE,
+    ControlId,
     InMemoryStateStore,
     ManualClock,
     OrderRequest,
@@ -94,29 +96,180 @@ class TestControlSequence:
         assert names[0] == "kill switch"
         assert names[1] == "daily loss limit"
 
-    def test_wide_open_limits_arm_only_well_formedness(self) -> None:
+    def test_every_control_id_appears_exactly_once(self) -> None:
+        ids = [control.id for control in CONTROL_SEQUENCE]
+        assert len(set(ids)) == len(ids)
+        assert set(ids) == set(ControlId)
+
+    def test_wide_open_limits_run_only_well_formedness(self) -> None:
         # With nothing configured, only the checks that make an order
         # well-formed remain — and an unremarkable order still passes.
-        assert engine(RiskLimits()).armed_controls() == (
-            "order quantity",
-            "order price",
-            "order notional",
+        assert engine(RiskLimits()).running_controls() == (
+            ControlId.ORDER_QUANTITY,
+            ControlId.ORDER_PRICE,
+            ControlId.ORDER_NOTIONAL,
         )
         assert engine(RiskLimits()).evaluate(order()).accepted
 
-    def test_armed_controls_follows_the_configuration(self) -> None:
+    def test_running_controls_follows_the_configuration(self) -> None:
         eng = engine(RiskLimits(max_order_quantity=10.0, prevent_self_match=True))
-        assert "maximum order quantity" in eng.armed_controls()
-        assert "self-match prevention" in eng.armed_controls()
-        assert "price band" not in eng.armed_controls()
+        assert ControlId.MAX_ORDER_QUANTITY in eng.running_controls()
+        assert ControlId.SELF_MATCH_PREVENTION in eng.running_controls()
+        assert ControlId.PRICE_BAND not in eng.running_controls()
 
-    def test_asking_what_is_armed_does_not_disturb_state(self) -> None:
+    def test_asking_what_is_running_does_not_disturb_state(self) -> None:
         # The duplicate window is stateful; probing controls to ask whether
         # they are armed must not touch it.
         eng = engine(RiskLimits(duplicate_window_millis=1_000))
         eng.record_order_sent(order())
-        eng.armed_controls()
+        eng.running_controls()
+        eng.control_status()
         assert eng.evaluate(order()).code is RejectCode.DUPLICATE_ORDER
+
+
+class TestEnablingAndDisablingControls:
+    """A control runs when it is configured AND not disabled.
+
+    Disabling is deliberately not the same as blanking a limit: the whole
+    point is to stand a control down without throwing away the number
+    somebody calibrated.
+    """
+
+    CONFIGURED = RiskLimits(
+        daily_loss_limit_usd=500.0,
+        max_order_quantity=1_000.0,
+        price_band_fraction=0.03,
+        max_orders_per_window=20,
+    )
+
+    def test_disable_stops_the_control_firing(self) -> None:
+        wild = order(limit_price=99.0, reference_price=10.0)
+        assert engine(self.CONFIGURED).evaluate(wild).code is RejectCode.PRICE_BAND_EXCEEDED
+        off = self.CONFIGURED.disable(ControlId.PRICE_BAND)
+        assert engine(off).evaluate(wild).accepted
+
+    def test_disable_keeps_the_limit(self) -> None:
+        # The calibration survives, so re-enabling does not need it re-derived.
+        off = self.CONFIGURED.disable(ControlId.PRICE_BAND)
+        assert off.price_band_fraction == 0.03
+
+    def test_enable_restores_it(self) -> None:
+        wild = order(limit_price=99.0, reference_price=10.0)
+        round_trip = self.CONFIGURED.disable(ControlId.PRICE_BAND).enable(ControlId.PRICE_BAND)
+        assert engine(round_trip).evaluate(wild).code is RejectCode.PRICE_BAND_EXCEEDED
+
+    def test_disable_takes_several_controls(self) -> None:
+        off = self.CONFIGURED.disable(ControlId.PRICE_BAND, ControlId.ORDER_RATE)
+        running = engine(off).running_controls()
+        assert ControlId.PRICE_BAND not in running
+        assert ControlId.ORDER_RATE not in running
+        assert ControlId.MAX_ORDER_QUANTITY in running
+
+    def test_limits_are_immutable(self) -> None:
+        # disable() returns a new limit set; the original is untouched.
+        self.CONFIGURED.disable(ControlId.PRICE_BAND)
+        assert self.CONFIGURED.disabled_controls == frozenset()
+
+    def test_enabling_a_control_with_no_limit_does_nothing(self) -> None:
+        enabled = RiskLimits().enable(ControlId.PRICE_BAND)
+        assert ControlId.PRICE_BAND not in engine(enabled).running_controls()
+
+    def test_disabling_is_idempotent(self) -> None:
+        once = self.CONFIGURED.disable(ControlId.PRICE_BAND)
+        assert once.disable(ControlId.PRICE_BAND).disabled_controls == once.disabled_controls
+
+    def test_enabling_something_never_disabled_is_harmless(self) -> None:
+        assert self.CONFIGURED.enable(ControlId.PRICE_BAND) == self.CONFIGURED
+
+    @pytest.mark.parametrize("locked", sorted(ALWAYS_ON, key=lambda c: c.value))
+    def test_well_formedness_controls_cannot_be_disabled(self, locked) -> None:
+        # A negative quantity is malformed whatever a desk's risk appetite is.
+        with pytest.raises(ValueError, match="well formed"):
+            RiskLimits(disabled_controls=frozenset({locked}))
+
+    def test_a_bare_string_is_refused(self) -> None:
+        # Disabling by display name would fail silently on any typo, leaving a
+        # control running that somebody believed they had switched off.
+        with pytest.raises(ValueError, match="ControlId"):
+            RiskLimits(disabled_controls=frozenset({"price band"}))
+
+    def test_a_string_equal_to_a_control_id_is_still_refused(self) -> None:
+        # ControlId subclasses str, so "PRICE_BAND" compares AND hashes equal
+        # to the member. A membership test would accept it; the validation is
+        # isinstance-based precisely so that it does not.
+        assert "PRICE_BAND" == ControlId.PRICE_BAND
+        assert "PRICE_BAND" in {ControlId.PRICE_BAND}
+        with pytest.raises(ValueError, match="ControlId"):
+            RiskLimits(disabled_controls=frozenset({"PRICE_BAND"}))
+
+    def test_a_mutable_set_is_frozen_on_the_way_in(self) -> None:
+        # Otherwise a "frozen" limit set holds a set somebody can still add to
+        # after validation has passed — including an always-on control.
+        handed_in = {ControlId.PRICE_BAND}
+        limits = RiskLimits(price_band_fraction=0.03, disabled_controls=handed_in)
+        assert isinstance(limits.disabled_controls, frozenset)
+        with pytest.raises(AttributeError):
+            limits.disabled_controls.add(ControlId.ORDER_QUANTITY)
+
+    def test_limits_stay_hashable(self) -> None:
+        # A limit set is a value: it gets logged, compared and put in sets.
+        assert hash(RiskLimits(disabled_controls={ControlId.PRICE_BAND})) is not None
+
+    def test_always_on_survives_a_forced_disable(self) -> None:
+        # The second of two locks. Construction refuses to disable these; this
+        # asserts the invariant also holds at the point of use, so reaching
+        # past the constructor does not switch off well-formedness.
+        limits = RiskLimits(max_order_quantity=5.0)
+        object.__setattr__(limits, "disabled_controls", frozenset({ControlId.ORDER_QUANTITY}))
+        assert limits.is_disabled(ControlId.ORDER_QUANTITY) is False
+        eng = engine(limits)
+        assert ControlId.ORDER_QUANTITY in eng.running_controls()
+        assert eng.evaluate(order(quantity=-5.0)).code is RejectCode.ORDER_QUANTITY_NOT_POSITIVE
+
+    def test_the_kill_switch_can_be_disabled(self, tmp_path: Path) -> None:
+        # Not every control should be locked on. A desk that manages its kill
+        # switch elsewhere must be able to turn this one off deliberately.
+        kill = tmp_path / "KILL"
+        kill.write_text("halt")
+        limits = RiskLimits(kill_switch_path=kill)
+        assert engine(limits).evaluate(order()).code is RejectCode.KILL_SWITCH_ENGAGED
+        assert engine(limits.disable(ControlId.KILL_SWITCH)).evaluate(order()).accepted
+
+
+class TestControlStatus:
+    def test_reports_every_control_in_evaluation_order(self) -> None:
+        status = engine(RiskLimits()).control_status()
+        assert len(status) == len(CONTROL_SEQUENCE)
+        assert [s.id for s in status] == [c.id for c in CONTROL_SEQUENCE]
+
+    def test_separates_unconfigured_from_disabled(self) -> None:
+        limits = RiskLimits(price_band_fraction=0.03).disable(ControlId.PRICE_BAND)
+        by_id = {s.id: s for s in engine(limits).control_status()}
+
+        band = by_id[ControlId.PRICE_BAND]
+        assert (band.configured, band.disabled, band.running) == (True, True, False)
+        assert "DISABLED" in str(band)
+
+        never_set = by_id[ControlId.GROSS_EXPOSURE]
+        assert (never_set.configured, never_set.disabled, never_set.running) == (
+            False,
+            False,
+            False,
+        )
+        assert "no limit configured" in str(never_set)
+
+        live = by_id[ControlId.ORDER_QUANTITY]
+        assert live.running is True
+        assert "running" in str(live)
+
+    def test_disabled_controls_lists_only_calibrated_ones(self) -> None:
+        # Naming an unconfigured control in the disable list is not the thing a
+        # supervisor asks about — only a control that was set up and then stood
+        # down counts as a decision somebody made.
+        limits = RiskLimits(price_band_fraction=0.03).disable(
+            ControlId.PRICE_BAND, ControlId.GROSS_EXPOSURE
+        )
+        assert engine(limits).disabled_controls() == (ControlId.PRICE_BAND,)
 
 
 class TestKillSwitch:

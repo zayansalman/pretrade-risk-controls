@@ -11,6 +11,7 @@ import pytest
 
 from pretrade_risk import (
     MAX_BYPASS_DURATION_MILLIS,
+    ControlId,
     InMemoryStateStore,
     OrderRequest,
     PreTradeRiskEngine,
@@ -298,10 +299,10 @@ class TestRuntimeCaps:
     @pytest.mark.asyncio
     async def test_an_override_can_arm_a_cap_that_was_not_configured(self, store, clock) -> None:
         eng = engine(store, clock)
-        assert "maximum order quantity" not in eng.armed_controls()
+        assert ControlId.MAX_ORDER_QUANTITY not in eng.running_controls()
         await set_runtime_max_order_quantity(store, 10.0)
         await eng.refresh_overrides()
-        assert "maximum order quantity" in eng.armed_controls()
+        assert ControlId.MAX_ORDER_QUANTITY in eng.running_controls()
 
     @pytest.mark.asyncio
     async def test_a_damaged_override_reads_as_unset(self, store, clock) -> None:

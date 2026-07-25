@@ -12,6 +12,95 @@ code, the limit that applied, and the value that breached it.
 
 Zero runtime dependencies; Python 3.11+.
 
+## What it checks
+
+Twenty-four controls, in the order every order walks them. The first one to
+object wins, and its code goes back to the caller.
+
+| # | Control | Rejects when | Code |
+|---|---|---|---|
+| 1 | Kill switch | the kill file exists — outranks everything, including an active bypass | `KILL_SWITCH_ENGAGED` |
+| 2 | Daily loss limit | realized P&L has drawn down to the trailing floor | `LOSS_LIMIT_BREACHED` |
+| 3 | Instrument universe | the instrument is outside the permitted set | `INSTRUMENT_NOT_PERMITTED` |
+| 4 | Restricted list | the instrument is restricted — blackout, information barrier | `INSTRUMENT_RESTRICTED` |
+| 5 | Session state | the venue phase does not permit order entry | `MARKET_SESSION_NOT_OPEN` |
+| 6 | Short sale locate | a short sale carries no secured borrow | `SHORT_SALE_LOCATE_MISSING` |
+| 7 | Order quantity | quantity is zero or negative | `ORDER_QUANTITY_NOT_POSITIVE` |
+| 8 | Order price | a limit price is zero or negative | `ORDER_PRICE_NOT_POSITIVE` |
+| 9 | Order notional | the priced notional is zero or negative | `ORDER_NOTIONAL_NOT_POSITIVE` |
+| 10 | Maximum order quantity | the clip is larger than any single order should be | `MAX_ORDER_QUANTITY_EXCEEDED` |
+| 11 | Maximum order notional | the clip is worth more than any single order should be | `MAX_ORDER_NOTIONAL_EXCEEDED` |
+| 12 | Quote age | the quotes the price controls depend on are stale | `MARKET_DATA_STALE` |
+| 13 | Price band | the limit price is too far from the reference, either way | `PRICE_BAND_EXCEEDED` |
+| 14 | Execution slippage | the market has moved against the decision price | `EXECUTION_SLIPPAGE_EXCEEDED` |
+| 15 | Duplicate order | an identical order went out moments ago | `DUPLICATE_ORDER` |
+| 16 | Order rate | too many orders inside the trailing window | `ORDER_RATE_EXCEEDED` |
+| 17 | Consecutive rejections | the venue keeps refusing and the strategy keeps trying | `CONSECUTIVE_REJECT_LIMIT_EXCEEDED` |
+| 18 | Repeated execution throttle | the strategy has traded N times without a human looking at it | `REPEATED_EXECUTION_THROTTLE` |
+| 19 | Working orders | too many orders already live at the venue | `MAX_WORKING_ORDERS_EXCEEDED` |
+| 20 | Open positions | too many instruments already held | `MAX_OPEN_POSITIONS_EXCEEDED` |
+| 21 | Position limit | the order would push the instrument outside its position limit | `MAX_POSITION_EXCEEDED` |
+| 22 | Self-match prevention | the firm's own quantity rests on the other side | `SELF_MATCH_PREVENTED` |
+| 23 | Gross exposure | portfolio gross exposure would exceed its limit | `GROSS_EXPOSURE_LIMIT_EXCEEDED` |
+| 24 | Daily notional limit | the day's cumulative notional would exceed its limit | `DAILY_NOTIONAL_LIMIT_EXCEEDED` |
+
+Plus `MARKET_DATA_UNAVAILABLE`, which any armed price control returns when the
+data it needs did not arrive — see *Fail-closed inputs* below.
+
+### Turning controls on and off
+
+A control runs when it is **configured and not disabled**. Two switches, on
+purpose.
+
+**Configure it** by setting its limit. Every limit defaults to unset, and
+unset means the control does not run — there are no implicit defaults, because
+a default limit is a limit nobody chose.
+
+**Disable it** by naming it in `disabled_controls`, which stands the control
+down *without discarding its calibration*:
+
+```python
+from pretrade_risk import ControlId, RiskLimits
+
+limits = RiskLimits(daily_loss_limit_usd=500.0, price_band_fraction=0.03)
+
+paused = limits.disable(ControlId.PRICE_BAND)  # limit stays at 0.03
+restored = paused.enable(ControlId.PRICE_BAND)  # no need to re-derive it
+```
+
+Blanking a limit to switch something off throws away a number somebody chose
+deliberately, and whoever turns it back on has to derive it again — which is
+how a limit comes back wrong. Disabling by `ControlId` rather than by string
+means a typo is a startup error, not a control that silently never runs.
+
+Two guardrails. The well-formedness controls (`ORDER_QUANTITY`,
+`ORDER_PRICE`, `ORDER_NOTIONAL`) cannot be disabled — a negative quantity is
+malformed whatever a desk's risk appetite is. Everything else can, including
+the kill switch, because a desk that manages one elsewhere needs to say so.
+
+Ask the engine what is actually live rather than reading the configuration:
+
+```python
+>>> engine.running_controls()          # what will evaluate the next order
+(<ControlId.DAILY_LOSS_LIMIT: ...>, <ControlId.ORDER_QUANTITY: ...>, ...)
+
+>>> engine.disabled_controls()         # configured, then deliberately stood down
+(<ControlId.PRICE_BAND: ...>,)
+
+>>> for status in engine.control_status():
+...     print(status)
+kill switch: no limit configured
+daily loss limit: running
+price band: DISABLED
+...
+```
+
+`control_status()` separates the two reasons a control is silent — nobody set
+a limit, or somebody switched it off. Those are different situations with
+different owners, and a supervisor only asks about the second.
+
+---
+
 ## Getting it
 
 This is source you clone. It is not published to any package index, and the
@@ -51,9 +140,9 @@ them are the seams you would swap when porting or embedding this.
 | Module | What it is |
 |---|---|
 | **`engine.py`** | The risk engine. Holds the limits and the day's counters, and runs every order through the controls in a fixed order. This is the module you call. |
-| **`limits.py`** | The limit set — one field per control. Anything left unset means that control is switched off. This is what a desk configures. |
+| **`limits.py`** | The limit set — one field per control, plus the `disable`/`enable` switch. Anything left unset means that control does not run. This is what a desk configures. |
 | **`order.py`** | The order being checked, plus the context the controls need: the touch, the session phase, the current position, how many orders are already working. |
-| **`decision.py`** | The answer. A stable reject code, the control that fired, the limit, the observed value, and a sentence for the operator. |
+| **`decision.py`** | The stable public identifiers — `ControlId` and `RejectCode` — and the answer itself: which control fired, the limit, the observed value, and a sentence for the operator. |
 | **`controls.py`** | The operator control plane — suspend a limit, resize a cap, re-arm after a halt. Writes the store; never touches a running engine. |
 | **`store.py`** | The persistence contract: get, get many, set, set many, over strings. A dictionary satisfies it; so does a database. |
 | **`sqlite_store.py`** | A SQLite implementation of that contract, with atomic batch writes. The only module with a third-party import. |
@@ -63,55 +152,6 @@ them are the seams you would swap when porting or embedding this.
 | **`windows.py`** | The trailing-window counters behind the duplicate and message-rate controls. |
 
 Read them in that order and the library makes sense end to end.
-
----
-
-## What it checks
-
-Twenty-four controls, in the order every order walks them. The first one to
-object wins, and its code goes back to the caller.
-
-| # | Control | Rejects when | Code |
-|---|---|---|---|
-| 1 | Kill switch | the kill file exists — outranks everything, including an active bypass | `KILL_SWITCH_ENGAGED` |
-| 2 | Daily loss limit | realized P&L has drawn down to the trailing floor | `LOSS_LIMIT_BREACHED` |
-| 3 | Instrument universe | the instrument is outside the permitted set | `INSTRUMENT_NOT_PERMITTED` |
-| 4 | Restricted list | the instrument is restricted — blackout, information barrier | `INSTRUMENT_RESTRICTED` |
-| 5 | Session state | the venue phase does not permit order entry | `MARKET_SESSION_NOT_OPEN` |
-| 6 | Short sale locate | a short sale carries no secured borrow | `SHORT_SALE_LOCATE_MISSING` |
-| 7 | Order quantity | quantity is zero or negative | `ORDER_QUANTITY_NOT_POSITIVE` |
-| 8 | Order price | a limit price is zero or negative | `ORDER_PRICE_NOT_POSITIVE` |
-| 9 | Order notional | the priced notional is zero or negative | `ORDER_NOTIONAL_NOT_POSITIVE` |
-| 10 | Maximum order quantity | the clip is larger than any single order should be | `MAX_ORDER_QUANTITY_EXCEEDED` |
-| 11 | Maximum order notional | the clip is worth more than any single order should be | `MAX_ORDER_NOTIONAL_EXCEEDED` |
-| 12 | Quote age | the quotes the price controls depend on are stale | `MARKET_DATA_STALE` |
-| 13 | Price band | the limit price is too far from the reference, either way | `PRICE_BAND_EXCEEDED` |
-| 14 | Execution slippage | the market has moved against the decision price | `EXECUTION_SLIPPAGE_EXCEEDED` |
-| 15 | Duplicate order | an identical order went out moments ago | `DUPLICATE_ORDER` |
-| 16 | Order rate | too many orders inside the trailing window | `ORDER_RATE_EXCEEDED` |
-| 17 | Consecutive rejections | the venue keeps refusing and the strategy keeps trying | `CONSECUTIVE_REJECT_LIMIT_EXCEEDED` |
-| 18 | Repeated execution throttle | the strategy has traded N times without a human looking at it | `REPEATED_EXECUTION_THROTTLE` |
-| 19 | Working orders | too many orders already live at the venue | `MAX_WORKING_ORDERS_EXCEEDED` |
-| 20 | Open positions | too many instruments already held | `MAX_OPEN_POSITIONS_EXCEEDED` |
-| 21 | Position limit | the order would push the instrument outside its position limit | `MAX_POSITION_EXCEEDED` |
-| 22 | Self-match prevention | the firm's own quantity rests on the other side | `SELF_MATCH_PREVENTED` |
-| 23 | Gross exposure | portfolio gross exposure would exceed its limit | `GROSS_EXPOSURE_LIMIT_EXCEEDED` |
-| 24 | Daily notional limit | the day's cumulative notional would exceed its limit | `DAILY_NOTIONAL_LIMIT_EXCEEDED` |
-
-Plus `MARKET_DATA_UNAVAILABLE`, which any armed price control returns when the
-data it needs did not arrive — see *Fail-closed inputs* below.
-
-A limit set is mostly unset fields, so "what is actually live right now" is
-the first question an operator asks. Ask the engine rather than reading the
-configuration — for the limits in the quickstart below:
-
-```python
->>> engine.armed_controls()
-('daily loss limit', 'session state', 'order quantity', 'order price',
- 'order notional', 'maximum order quantity', 'maximum order notional',
- 'quote age', 'price band', 'execution slippage', 'duplicate order',
- 'order rate', 'position limit', 'daily notional limit')
-```
 
 ---
 

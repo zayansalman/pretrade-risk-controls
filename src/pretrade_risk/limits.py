@@ -1,11 +1,23 @@
 """The limit set: one field per control, every control off until configured.
 
-Two conventions run through this whole structure.
+A control runs when it is **configured and not disabled**. Those are two
+separate switches on purpose, and the difference matters operationally.
+
+Three conventions run through this whole structure.
 
 **A limit of ``None`` means the control is not armed.** There are no implicit
 defaults, because a default limit is a limit nobody chose, and a risk limit
 nobody chose is one nobody owns. Configuring a field is the act of turning its
 control on.
+
+**``disabled_controls`` stands a control down without discarding its
+calibration.** Blanking a limit to switch a control off throws away the number
+somebody chose deliberately, and whoever turns it back on has to derive it
+again — which is how a limit comes back wrong. Naming the control in
+``disabled_controls`` leaves the limit where it is and the intent legible in
+a diff. Disabling by :class:`~pretrade_risk.decision.ControlId` rather than by
+string means a typo fails at startup instead of producing a control that
+silently never runs.
 
 **An armed control that cannot be evaluated rejects the order.** If a price
 band is configured and no reference price arrives, the engine returns
@@ -24,10 +36,11 @@ runtime through the operator control plane without a restart.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from pretrade_risk.clock import MILLIS_PER_DAY
+from pretrade_risk.decision import ALWAYS_ON, ControlId
 from pretrade_risk.order import SessionState
 
 
@@ -119,6 +132,45 @@ class RiskLimits:
     #: limit does not reset in the middle of a live evening session.
     session_roll_millis: int = 0
 
+    # -- The off switch --------------------------------------------------------
+    #: Controls to stand down even though their limits are configured. Use
+    #: :meth:`disable` and :meth:`enable` rather than setting this by hand.
+    #: The well-formedness controls in
+    #: :data:`~pretrade_risk.decision.ALWAYS_ON` cannot be named here.
+    disabled_controls: frozenset[ControlId] = field(default_factory=frozenset)
+
+    def disable(self, *controls: ControlId) -> RiskLimits:
+        """A copy of this limit set with ``controls`` switched off.
+
+        >>> limits.disable(ControlId.PRICE_BAND, ControlId.ORDER_RATE)
+
+        The limits themselves are left alone, so re-enabling restores the
+        calibration that was already there.
+        """
+        return replace(self, disabled_controls=self.disabled_controls | frozenset(controls))
+
+    def enable(self, *controls: ControlId) -> RiskLimits:
+        """A copy of this limit set with ``controls`` switched back on.
+
+        Enabling a control whose limit is unset does nothing on its own — the
+        control still needs a limit before it has anything to enforce.
+        """
+        return replace(self, disabled_controls=self.disabled_controls - frozenset(controls))
+
+    def is_disabled(self, control: ControlId) -> bool:
+        """Whether this control has been switched off.
+
+        The well-formedness controls answer ``False`` unconditionally rather
+        than by consulting the set. Construction already refuses to disable
+        them, so this is the second of two locks: the invariant holds at the
+        point of use even if the first one is somehow circumvented, and a
+        control that decides whether an order is well formed at all is not
+        something to protect with a single check.
+        """
+        if control in ALWAYS_ON:
+            return False
+        return control in self.disabled_controls
+
     def __post_init__(self) -> None:
         """Reject an incoherent limit set at construction.
 
@@ -157,3 +209,31 @@ class RiskLimits:
             raise ValueError("order_rate_window_millis must be positive")
         if not 0 <= self.session_roll_millis < MILLIS_PER_DAY:
             raise ValueError("session_roll_millis must be within [0, 86_400_000)")
+
+        # Freeze whatever collection was handed in. A plain set would stay
+        # mutable inside a "frozen" limit set, which costs two things: the
+        # limit set stops being hashable, and — worse — a control could be
+        # added to the disable list AFTER the checks below had passed,
+        # including one that must never be disabled. Copying to a frozenset
+        # here means the validation that follows is the last word.
+        object.__setattr__(self, "disabled_controls", frozenset(self.disabled_controls))
+
+        # A disable list is a list of controls somebody decided to stand down,
+        # so anything in it that is not a control is a mistake worth failing
+        # on. Silently ignoring an unrecognised entry would leave a desk
+        # believing a control was off when it was running, or — worse — that
+        # they had turned something off when the name never matched anything.
+        # ``isinstance`` rather than membership, because ControlId subclasses
+        # ``str``: a bare "PRICE_BAND" compares and hashes equal to the member,
+        # so a set test would wave typo-adjacent strings straight through.
+        unknown = {entry for entry in self.disabled_controls if not isinstance(entry, ControlId)}
+        if unknown:
+            raise ValueError(
+                f"disabled_controls must contain ControlId members, got {sorted(map(str, unknown))}"
+            )
+        locked = self.disabled_controls & ALWAYS_ON
+        if locked:
+            raise ValueError(
+                "these controls decide whether an order is well formed at all and "
+                f"cannot be disabled: {sorted(control.value for control in locked)}"
+            )
