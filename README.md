@@ -1,8 +1,7 @@
-# polymarket-pretrade-risk-controls
+# pretrade-risk-controls
 
-A **pre-trade risk control layer**, built for a Polymarket trading desk and
-venue-independent by construction. Every order answers one question before it
-leaves the building:
+A venue-independent **pre-trade risk control layer**. Every order answers one
+question before it leaves the building:
 
 ```python
 decision = engine.evaluate(order)
@@ -22,13 +21,12 @@ pip install -e ".[sqlite]"  # adds the SQLite-backed store (aiosqlite)
 from pretrade_risk import PreTradeRiskEngine, RiskLimits, OrderRequest
 ```
 
-> **On the name.** The Polymarket prefix records where these controls come
-> from and what they run against — not a coupling in the code. There is no
-> venue-specific logic anywhere in this library: no Polymarket client, no
-> assumption that prices are bounded by 1, no binary-contract arithmetic. It
-> takes an order and some context, and returns a decision. Point it at
-> equities, futures or FX and every control still applies. See
-> [Naming](#naming) for why the distribution and the import package differ.
+> **Venue-independent means venue-independent.** There is no venue client
+> here, no assumption about how prices are bounded, no instrument-type
+> arithmetic. The engine takes an order plus some context and returns a
+> decision. It was built against a prediction-market desk and applies
+> unchanged to equities, futures or FX. See [Naming](#naming) for why the
+> distribution and the import package differ.
 
 ---
 
@@ -250,10 +248,10 @@ Run the narrated walkthrough of a full session: `python examples/demo.py`.
 
 ```mermaid
 flowchart LR
-    S[Strategies] --> R["polymarket-pretrade-risk-controls<br/>pre-trade risk controls"]
+    S[Strategies] --> R["pretrade-risk-controls<br/>pre-trade risk controls"]
     D[Market data] --> E
     R --> E[Execution / order routing]
-    E --> V[(Polymarket CLOB<br/>or any venue)]
+    E --> V[(Trading venue)]
     E --> L[(Ledger)]
     L --> C[Operator console]
     L --> P[Post-trade reconciliation]
@@ -263,11 +261,11 @@ flowchart LR
     class R here
 ```
 
-The venue box is the only Polymarket-shaped thing in that picture, and this
-library does not talk to it — the execution layer does.
+Note where the venue sits: two hops away. This library never talks to it —
+the execution layer does, and that is what keeps the controls venue-neutral.
 
 Standalone components extracted from the same trading system:
-`polymarket-pretrade-risk-controls` — this repository,
+`pretrade-risk-controls` — this repository,
 [ledger-recon](https://github.com/zayansalman/ledger-recon) (post-trade
 reconciliation),
 [feedwatch](https://github.com/zayansalman/feedwatch) (feed health and
@@ -518,21 +516,17 @@ participant-facing component is the "PTRM Gateway", and Exegy sells "market
 access gateways". A repository called `pretrade-gate` reads, to someone in the
 field, like connectivity rather than risk logic.
 
-So the distribution is now `polymarket-pretrade-risk-controls`: the venue it
-was built for, then the industry's own phrase for what it is.
+So the distribution is `pretrade-risk-controls` — the industry's own phrase
+for what this is, and the term someone would search for.
 
-**The import package stays short: `pretrade_risk`.** A distribution name and
+**The import package stays shorter: `pretrade_risk`.** A distribution name and
 an import name are allowed to differ in Python and routinely do —
 `scikit-learn` imports as `sklearn`, `beautifulsoup4` as `bs4`,
-`python-dateutil` as `dateutil`. The alternative here would put
-`polymarket_pretrade_risk_controls` at the head of every import line, which
-costs 33 characters of every call site to restate what the package metadata
-already says. The long name belongs on the tin; the short one belongs in the
-code.
+`python-dateutil` as `dateutil`. The full name earns its length on the tin,
+where it has to be unambiguous among every other package in the world; at a
+call site it would only restate what the import already makes obvious.
 
-Persisted state lives under `pretrade.*`, unchanged — it is an internal
-namespace, and a venue prefix on a state key would be misleading in exactly
-the way the code is not.
+Persisted state lives under `pretrade.*`.
 
 ---
 
